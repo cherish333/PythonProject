@@ -1,21 +1,21 @@
-
 import tkinter as tk
 from tkinter import filedialog
 import json
 import os
 import subprocess
 from tkinter import ttk
-# 默认路径配置
+from tkinterdnd2 import *
+# 默认路径配置:
 DEFAULT_PATHS = {
     # 移除默认路径
 }
 class DarkScrollbar(tk.Canvas):
     """自定义深色滚动条"""
     def __init__(self, parent, **kwargs):
-        self.command = kwargs.pop('command', None)  # 保存command参数
+        self.command = kwargs.pop('command', None)  # 修复参数名
         bg = kwargs.pop('bg', '#2b2b2b')
         width = kwargs.pop('width', 10)
-        super().__init__(parent, width=width, bg=bg, highlightthickness=0, **kwargs)
+        super().__init__(parent, width=width, bg=bg, highlightthickness=0, **kwargs)  # 修复初始化
         
         # 创建滚动条
         self._offset = 0
@@ -24,7 +24,7 @@ class DarkScrollbar(tk.Canvas):
         
         # 绑定事件
         self.bind('<Configure>', self._on_configure)
-        self.bind('<Button-1>', self._on_click)
+        self.bind('<Button-1>', self._on_click)  # 修复按钮事件名
         self.bind('<B1-Motion>', self._on_drag)
     
     def _create_scroll_bar(self):
@@ -82,7 +82,7 @@ class FolderAccessTool:
     FONT_TITLE = ("Microsoft YaHei", 10)
     
     def __init__(self):
-        self.root = tk.Tk()
+        self.root = TkinterDnD.Tk()
         self.root.title("Folder Quick Access")
         self.root.geometry("400x500")
         self.root.configure(bg="#2b2b2b")
@@ -126,6 +126,10 @@ class FolderAccessTool:
         # 创建主框架
         self.main_frame = tk.Frame(self.root, bg="#2b2b2b")
         self.main_frame.pack(padx=20, pady=20, fill="both", expand=True)
+        
+        # 启用拖放功能
+        self.root.drop_target_register(DND_FILES)
+        self.root.dnd_bind('<<Drop>>', self._on_drop)
         
         # 创建按钮显示区域的容器框架
         buttons_container = tk.Frame(self.main_frame, bg="#2b2b2b")
@@ -214,31 +218,22 @@ class FolderAccessTool:
         widget.bind("<B1-Motion>", do_move)
     def _create_toolbar(self):
         """创建工具栏"""
-        # 创建一个框架来容纳按钮，放在底部
         toolbar = tk.Frame(self.main_frame, bg="#2b2b2b", height=40)
         toolbar.pack(side="bottom", fill="x", pady=10)
         toolbar.pack_propagate(False)
         
-        # 创建一个内部框架来居中放置按钮和复选框
         button_container = tk.Frame(toolbar, bg="#2b2b2b")
         button_container.pack(expand=True, pady=5)
         
-        # 添加路径按钮
-        add_btn = tk.Button(
+        # 提示标签
+        hint_label = tk.Label(
             button_container,
-            text="Add Path",
-            command=self._show_add_dialog,
-            bg="#4c5052",
-            fg="white",
-            activebackground="#5c6062",
-            activeforeground="white",
-            relief="flat",
-            cursor="hand2",
-            width=10,
-            height=1,
+            text="拖放文件夹到此处添加",
+            bg="#2b2b2b",
+            fg="#888888",
             font=self.FONT_NORMAL
         )
-        add_btn.pack(side="left", padx=5)
+        hint_label.pack(side="left", padx=5)
         
         # 添加复选框
         copy_checkbox = tk.Checkbutton(
@@ -253,14 +248,6 @@ class FolderAccessTool:
             font=self.FONT_NORMAL
         )
         copy_checkbox.pack(side="left", padx=10)
-        
-        # 添加按钮悬停效果
-        def on_enter(e):
-            e.widget['background'] = '#5c6062'
-        def on_leave(e):
-            e.widget['background'] = '#4c5052'
-        add_btn.bind("<Enter>", on_enter)
-        add_btn.bind("<Leave>", on_leave)
     def _show_add_dialog(self):
         """显示添加路径对话框"""
         if self.add_dialog:
@@ -625,6 +612,35 @@ class FolderAccessTool:
         
         resize_frame.bind("<Enter>", on_enter)
         resize_frame.bind("<Leave>", on_leave)
+    def _on_drop(self, event):
+        """处理文件夹拖放"""
+        # 获取拖放的路径
+        path = event.data
+        
+        # 如果是 Windows 系统，需要处理路径格式
+        if os.name == 'nt':
+            path = path.strip('{}')  # 移除可能的花括号
+            # 处理多个文件的情况，我们只取第一个
+            if ' ' in path:
+                path = path.split(' ')[0]
+        
+        # 确保路径存在且是文件夹
+        if os.path.exists(path) and os.path.isdir(path):
+            # 使用文件夹名作为按钮名称
+            name = os.path.basename(path)
+            
+            # 如果名称已存在，添加数字后缀
+            base_name = name
+            counter = 1
+            while name in self.paths_data:
+                name = f"{base_name}_{counter}"
+                counter += 1
+            
+            # 添加新路径
+            self.paths_data[name] = path
+            self._save_paths()
+            self._create_path_buttons()
+            self._show_message("Path added successfully!")
     def run(self):
         """运行程序"""
         self.root.mainloop()
