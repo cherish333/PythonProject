@@ -9,10 +9,10 @@ from win32com.client import Dispatch
 import re
 from PIL import Image, ImageTk
 import time
-# 默认路径配置:
-DEFAULT_PATHS = {
-    # 移除默认路径:,()
-}
+import logging
+from datetime import datetime
+import glob
+
 class DarkScrollbar(tk.Canvas):
     """自定义深色滚动条"""
     def __init__(self, parent, **kwargs):
@@ -34,13 +34,24 @@ class DarkScrollbar(tk.Canvas):
             self.delete(self._scroll_bar)
         height = self.winfo_height() - 2*self._offset
         if height > 0:
-            self._scroll_bar = self.create_rectangle(
-                2, self._offset,
-                self.winfo_width()-2, height,
+            # 创建圆角滚动条
+            radius = 5  # 圆角半径
+            x1, y1 = 2, self._offset
+            x2, y2 = self.winfo_width()-2, height
+            
+            # 创建圆角矩形路径
+            self._scroll_bar = self.create_polygon(
+                x1+radius, y1,
+                x2-radius, y1,
+                x2, y1+radius,
+                x2, y2-radius,
+                x2-radius, y2,
+                x1+radius, y2,
+                x1, y2-radius,
+                x1, y1+radius,
                 fill='#4c5052',
                 outline='#4c5052',
-                tags=('scrollbar',),
-                width=0
+                smooth=True
             )
     
     def _on_configure(self, event):
@@ -63,7 +74,7 @@ class DarkScrollbar(tk.Canvas):
         first = float(first)
         last = float(last)
         height = self.winfo_height()
-        top = ,eight * first
+        top = height * first
         bottom = height * last
         self._offset = top
         self._create_scroll_bar()
@@ -72,7 +83,74 @@ class DarkScrollbar(tk.Canvas):
         if 'command' in kwargs:
             self.command = kwargs.pop('command')
         super().configure(**kwargs)
+
+class RoundedButton(tk.Frame):
+    """圆角按钮"""
+    def __init__(self, parent, text, command=None, **kwargs):
+        super().__init__(parent, bg=kwargs.get('bg', '#2b2b2b'))
+        
+        # 提取样式参数
+        bg_color = kwargs.get('bg', '#2b2b2b')
+        fg_color = kwargs.get('fg', 'white')
+        active_bg = kwargs.get('activebackground', bg_color)
+        active_fg = kwargs.get('activeforeground', fg_color)
+        width = kwargs.get('width', 20)
+        height = kwargs.get('height', 2)
+        font = kwargs.get('font', ('Microsoft YaHei', 9))
+        
+        # 创建圆角框架
+        self.frame = tk.Frame(
+            self,
+            bg=bg_color,
+            highlightbackground=kwargs.get('highlightbackground', bg_color),
+            highlightthickness=kwargs.get('highlightthickness', 1),
+            bd=0
+        )
+        self.frame.pack(expand=True, fill="both", padx=2, pady=2)
+        
+        # 创建按钮
+        self.button = tk.Button(
+            self.frame,
+            text=text,
+            command=command,
+            bg=bg_color,
+            fg=fg_color,
+            activebackground=active_bg,
+            activeforeground=active_fg,
+            relief="flat",
+            cursor="hand2",
+            width=width,
+            height=height,
+            font=font,
+            bd=0
+        )
+        self.button.pack(expand=True, fill="both", padx=1, pady=1)
+        
+        # 绑定事件
+        self.button.bind('<Enter>', self._on_enter)
+        self.button.bind('<Leave>', self._on_leave)
+        
+    def _on_enter(self, event):
+        """鼠标进入时的效果"""
+        self.frame.configure(highlightbackground=self.button.cget('activebackground'))
+        
+    def _on_leave(self, event):
+        """鼠标离开时的效果"""
+        self.frame.configure(highlightbackground=self.button.cget('bg'))
+        
+    def configure(self, **kwargs):
+        """配置按钮属性"""
+        self.button.configure(**kwargs)
+        if 'bg' in kwargs:
+            self.frame.configure(bg=kwargs['bg'])
+            
+    def cget(self, key):
+        """获取按钮属性"""
+        return self.button.cget(key)
+
 class FolderAccessTool:
+    VERSION = "1.0.0"
+    
     # 添加支持的文件格式
     SUPPORTED_FORMATS = {
         "图片": [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp"],
@@ -252,6 +330,30 @@ class FolderAccessTool:
         self.root.bind("<Unmap>", self._on_minimize)
         self.root.bind("<Map>", self._on_restore)
         
+        # 设置日志系统
+        self._setup_logging()
+        
+        # 添加缓存机制
+        self._icon_cache = {}
+        self._path_info_cache = {}
+        
+        # 设置快捷键（只保留必要的快捷键）
+        self._setup_hotkeys()
+        
+    def _setup_logging(self):
+        """配置日志系统"""
+        log_dir = os.path.join(self.config_dir, 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        
+        log_file = os.path.join(log_dir, f'quicklaunch_{datetime.now().strftime("%Y%m%d")}.log')
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_file, encoding='utf-8'),
+                logging.StreamHandler()
+            ]
+        )
     def _center_window(self):
         """将窗口位置调整到屏幕左上角"""
         # 窗口尺寸
@@ -307,7 +409,7 @@ class FolderAccessTool:
         button_container.pack(expand=True, pady=5)
         
         # 添加清空按钮（降低红色饱和度）
-        clear_btn = tk.Button(
+        clear_btn = RoundedButton(
             button_container,
             text="清空",
             command=self._clear_all_shortcuts,
@@ -609,13 +711,18 @@ class FolderAccessTool:
                 "cursor": "hand2",
                 "width": 25,
                 "height": 2,
-                "font": self.FONT_BOLD
+                "font": self.FONT_BOLD,
+                # 添加圆角和边框
+                "bd": 0,
+                "highlightthickness": 1,
+                "highlightbackground": style["bg"],
+                "highlightcolor": style["active_bg"]
             }
             
             # 访问按钮（添加图标）
-            btn = tk.Button(
+            btn = RoundedButton(
                 button_frame,
-                text=f"{style['icon']} {display_name}",  # 添加新图标
+                text=f"{style['icon']} {display_name}",
                 command=lambda p=path: self._on_button_click(p),
                 **button_style
             )
@@ -640,6 +747,36 @@ class FolderAccessTool:
             
             btn.bind("<Button-3>", show_menu)
             btn.bind("<Control-Button-1>", show_menu)
+            
+            # 添加悬停效果
+            def on_enter(e):
+                btn.config(
+                    bg=style["active_bg"],
+                    highlightbackground=style["active_bg"]
+                )
+                # 添加平滑过渡动画
+                for i in range(10):
+                    alpha = 0.1 * i
+                    color = self._blend_colors(style["bg"], style["active_bg"], alpha)
+                    btn.config(bg=color)
+                    btn.update()
+                    time.sleep(0.01)
+            
+            def on_leave(e):
+                btn.config(
+                    bg=style["bg"],
+                    highlightbackground=style["bg"]
+                )
+                # 添加平滑过渡动画
+                for i in range(10):
+                    alpha = 0.1 * (10-i)
+                    color = self._blend_colors(style["bg"], style["active_bg"], alpha)
+                    btn.config(bg=color)
+                    btn.update()
+                    time.sleep(0.01)
+            
+            btn.bind("<Enter>", on_enter)
+            btn.bind("<Leave>", on_leave)
         
         # 配置网格列的权重
         grid_frame.grid_columnconfigure(0, weight=1)
@@ -684,19 +821,37 @@ class FolderAccessTool:
             return {}
             
     def _save_paths(self):
-        """保存路径"""
+        """保存路径配置并创建备份"""
         try:
+            # 保存当前配置
             with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(self.paths_data, f, ensure_ascii=False, indent=2)
+                json.dump(self.paths_data, f, ensure_ascii=False, indent=4)
+            
+            # 创建备份
+            backup_dir = os.path.join(self.config_dir, 'backups')
+            os.makedirs(backup_dir, exist_ok=True)
+            backup_file = os.path.join(
+                backup_dir, 
+                f'paths_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
+            )
+            with open(backup_file, 'w', encoding='utf-8') as f:
+                json.dump(self.paths_data, f, ensure_ascii=False, indent=4)
+            
+            # 清理旧备份（只保留最近10个）
+            backups = sorted(glob.glob(os.path.join(backup_dir, 'paths_backup_*.json')))
+            if len(backups) > 10:
+                for old_backup in backups[:-10]:
+                    os.remove(old_backup)
+                
         except Exception as e:
-            print(f"Error saving paths: {e}")
+            logging.error(f"保存配置失败: {e}")
+            self._show_message("配置保存失败！")
             
     def _show_message(self, message):
-        """显示消息"""
         msg_window = tk.Toplevel(self.root)
         msg_window.overrideredirect(True)
         msg_window.configure(bg="#1e1e1e")
-        msg_window.attributes('-topmost', True)
+        msg_window.attributes('-topmost', True, '-alpha', 0.0)  # 初始透明
         
         # 设置消息框位置
         window_width = 200
@@ -724,8 +879,22 @@ class FolderAccessTool:
         )
         msg_label.pack(pady=15)
         
-        # 1秒后自动关闭
-        msg_window.after(1000, msg_window.destroy)
+        # 淡入动画
+        for i in range(10):
+            msg_window.attributes('-alpha', i/10)
+            msg_window.update()
+            time.sleep(0.02)
+        
+        # 等待后淡出
+        msg_window.after(800, lambda: self._fade_out_message(msg_window))
+        
+    def _fade_out_message(self, window):
+        """消息窗口淡出动画"""
+        for i in range(10):
+            window.attributes('-alpha', (10-i)/10)
+            window.update()
+            time.sleep(0.02)
+        window.destroy()
         
     def _browse_path(self, entry):
         """浏览文件夹"""
@@ -755,7 +924,7 @@ class FolderAccessTool:
             self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
     def _create_resize_area(self):
         """创建窗口大小调整区域"""
-        resize_frame = tk.Frame(self.root, bg="#1e1e1e", height=4, cursor="sizing")  # 改为 sizing 光标
+        resize_frame = tk.Frame(self.root, bg="#1e1e1e", height=4, cursor="sizing")
         resize_frame.pack(side="bottom", fill="x")
         
         def start_resize(event):
@@ -765,6 +934,9 @@ class FolderAccessTool:
             self.root.start_width = self.root.winfo_width()
         
         def do_resize(event):
+            if not hasattr(self.root, 'start_height'):
+                return
+            
             # 计算高度和宽度的变化
             height_diff = event.y_root - self.root.start_y
             width_diff = event.x_root - self.root.start_x
@@ -773,12 +945,12 @@ class FolderAccessTool:
             new_height = self.root.start_height + height_diff
             new_width = self.root.start_width + width_diff
             
-            # 计算按钮的基础宽度（25字符 * 8像素/字符 + 边距）
+            # 计算按钮的基础宽度
             button_width = (25 * 8) + (10 * 3)
             
             # 限制最小和最大尺寸
-            min_width = button_width  # 最小宽度为一个按钮的宽度
-            max_width = button_width * 3  # 最大宽度为三个按钮的宽度
+            min_width = button_width
+            max_width = button_width * 3
             min_height = 300
             max_height = self.root.winfo_screenheight() - 100
             
@@ -792,9 +964,22 @@ class FolderAccessTool:
             
             # 更新窗口大小和位置
             self.root.geometry(f"{int(new_width)}x{int(new_height)}+{x}+{y}")
+            
+            # 强制重绘界面
+            self._redraw_interface()
+        
+        def stop_resize(event):
+            if hasattr(self.root, 'start_height'):
+                delattr(self.root, 'start_height')
+                delattr(self.root, 'start_width')
+                delattr(self.root, 'start_x')
+                delattr(self.root, 'start_y')
+                # 最终重绘一次确保界面正常
+                self.root.after(100, self._redraw_interface)
         
         resize_frame.bind("<Button-1>", start_resize)
         resize_frame.bind("<B1-Motion>", do_resize)
+        resize_frame.bind("<ButtonRelease-1>", stop_resize)
         
         # 添加视觉反馈
         def on_enter(event):
@@ -805,6 +990,25 @@ class FolderAccessTool:
         
         resize_frame.bind("<Enter>", on_enter)
         resize_frame.bind("<Leave>", on_leave)
+    def _redraw_interface(self):
+        """重绘整个界面"""
+        try:
+            # 更新画布配置
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+            
+            # 重新计算和更新按钮框架的宽度
+            self.canvas.itemconfig(self.canvas_frame, width=self.canvas.winfo_width())
+            
+            # 强制更新所有子组件
+            for widget in self.buttons_frame.winfo_children():
+                widget.update()
+            
+            # 更新主窗口
+            self.root.update_idletasks()
+            self.root.update()
+            
+        except Exception as e:
+            print(f"重绘界面时出错: {e}")
     def _on_drop(self, event):
         """处理文件夹、快捷方式和文件的拖放"""
         try:
@@ -970,6 +1174,14 @@ class FolderAccessTool:
             print(f"拖放处理时出错: {e}")
             self._show_message(f"添加失败: {str(e)}")
     def _get_shortcut_info(self, shortcut_path):
+        """获取快捷方式信息（带缓存）"""
+        if shortcut_path in self._path_info_cache:
+            return self._path_info_cache[shortcut_path]
+            
+        info = self._fetch_shortcut_info(shortcut_path)
+        self._path_info_cache[shortcut_path] = info
+        return info
+    def _fetch_shortcut_info(self, shortcut_path):
         """获取快捷方式信息"""
         try:
             print(f"Getting info for: {shortcut_path}")
@@ -1001,6 +1213,17 @@ class FolderAccessTool:
                         "powerpoint": ("PowerPoint", "📊"),
                         "outlook": ("Outlook", "📧")
                     }
+                },
+                "browser": {
+                    "name": "浏览器",
+                    "patterns": ["chrome", "firefox", "edge", "opera"],
+                    "apps": {
+                        "chrome": "Chrome",
+                        "firefox": "Firefox",
+                        "edge": "Edge",
+                        "opera": "Opera"
+                    },
+                    "icon": "🌐"
                 }
             }
             
@@ -1419,37 +1642,56 @@ class FolderAccessTool:
             self.hot_corner_active = False
             self.detector.withdraw()
     def _create_tooltip(self, widget, text):
-        """创建工具提示"""
         def enter(event):
             widget.tooltip = tk.Toplevel()
-            widget.tooltip.withdraw()  # 先隐藏，等待位置计算
-            
-            # 设置工具提示窗口样式
+            widget.tooltip.withdraw()
             widget.tooltip.wm_overrideredirect(True)
-            widget.tooltip.configure(bg="#1e1e1e")
             
-            # 创建标签
-            label = tk.Label(
+            # 创建圆角框架
+            frame = tk.Frame(
                 widget.tooltip,
+                bg="#1e1e1e",
+                bd=1,
+                relief="solid",
+                highlightbackground="#4c5052",
+                highlightthickness=1
+            )
+            frame.pack(padx=2, pady=2)
+            
+            # 添加图标
+            icon_label = tk.Label(
+                frame,
+                text="ℹ️",
+                bg="#1e1e1e",
+                fg="white",
+                font=self.FONT_NORMAL
+            )
+            icon_label.pack(side="left", padx=(5,2))
+            
+            # 文本标签
+            label = tk.Label(
+                frame,
                 text=text,
                 justify=tk.LEFT,
                 bg="#1e1e1e",
                 fg="white",
-                relief="solid",
-                borderwidth=1,
-                font=self.FONT_NORMAL,
-                padx=5,
-                pady=2
+                font=self.FONT_NORMAL
             )
-            label.pack()
+            label.pack(side="left", padx=(2,5), pady=2)
             
-            # 计算位置
+            # 淡入效果
+            widget.tooltip.update_idletasks()
+            widget.tooltip.deiconify()
+            widget.tooltip.attributes('-alpha', 0.0)
+            
             x = widget.winfo_rootx()
             y = widget.winfo_rooty() + widget.winfo_height() + 5
-            
-            # 显示工具提示
             widget.tooltip.geometry(f"+{x}+{y}")
-            widget.tooltip.deiconify()
+            
+            for i in range(10):
+                widget.tooltip.attributes('-alpha', i/10)
+                widget.tooltip.update()
+                time.sleep(0.01)
         
         def leave(event):
             if hasattr(widget, "tooltip"):
@@ -1458,9 +1700,32 @@ class FolderAccessTool:
         
         widget.bind('<Enter>', enter)
         widget.bind('<Leave>', leave)
+    def _setup_hotkeys(self):
+        """设置快捷键"""
+        self.root.bind('<Control-q>', lambda e: self.root.quit())
+        self.root.bind('<Escape>', lambda e: self.root.iconify())
+    def _check_backup_status(self):
+        """检查备份状态"""
+        last_backup = self._get_last_backup_time()
+        if (datetime.now() - last_backup).days >= 7:
+            self._show_backup_reminder()
     def run(self):
         """运行程序"""
         self.root.mainloop()
+
+class ShortcutManager:
+    def __init__(self):
+        self.shortcuts = {}
+        self.tags = set()
+        
+    def add_shortcut(self, name, path, tags=None):
+        self.shortcuts[name] = {
+            'path': path,
+            'tags': set(tags or [])
+        }
+        if tags:
+            self.tags.update(tags)
+
 if __name__ == "__main__":
     app = FolderAccessTool()
     app.run()
