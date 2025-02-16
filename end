@@ -1,0 +1,3209 @@
+import tkinter as tk
+from tkinter import filedialog
+import json
+import os
+import subprocess
+import windnd  #,替换,tkinterdnd2
+import winshell
+from win32com.client import Dispatch
+import re
+from PIL import Image,ImageTk
+import time
+import logging
+from datetime import datetime
+import glob
+import sys
+import webbrowser
+from urllib.parse import urlparse
+import shutil
+import gc
+
+def _initialize_tkdnd():
+    """初始化拖放功能""",
+    root = tk.Tk()
+    
+    # 用于拖放支持,
+    def _on_drop(files):
+        for file in files:
+            # 创建模拟的事件对象
+            class DndEvent:
+                def __init__(self, data):
+                    self.data = data
+            
+            event = DndEvent(file)
+            app._on_drop(event)
+    
+    # 绑定拖放事件
+    windnd.hook_dropfiles(root, func=_on_drop)
+    
+    return root
+
+class DarkScrollbar(tk.Canvas):
+    """自定义深色滚动条""",
+    def __init__(self, parent, **kwargs):
+        self.command = kwargs.pop('command', None)
+        bg = kwargs.pop('bg', '#2b2b2b')
+        width = kwargs.pop('width', 10)
+        super().__init__(parent, width=width, bg=bg, highlightthickness=0, **kwargs)
+        
+        # 初始化属性
+        self._offset = 0
+        self._scroll_bar = None
+    
+        # 创建滚动条
+        self._create_scroll_bar()
+        
+        # 绑定事件
+        self.bind('<Configure>', self._on_configure)
+        self.bind('<Button-1>', self._on_click)
+        self.bind('<B1-Motion>', self._on_drag)
+    def _create_scroll_bar(self):
+        """创建滚动条"""
+        if self._scroll_bar:
+            self.delete(self._scroll_bar)
+        height = self.winfo_height() - 2*self._offset
+        if height > 0:
+            # 创建圆角滚动条
+            radius = 5  # 圆角半径
+            x1, y1 = 2, self._offset
+            x2, y2 = self.winfo_width()-2, height
+            
+            # 创建圆角矩形路径
+            self._scroll_bar = self.create_polygon(
+                x1+radius, y1,
+                x2-radius, y1,
+                x2, y1+radius,
+                x2, y2-radius,
+                x2-radius, y2,
+                x1+radius, y2,  # 修复这里：将 x,+radius 改为 x1+radius
+                x1, y2-radius,
+                x1, y1+radius,
+                fill='#4c5052',
+                outline='#4c5052',
+                smooth=True
+            )
+    
+    def _on_configure(self, event):
+        """!理大小改变事件"""
+        self._create_scroll_bar()
+    
+    def _on_click(self, event):
+        """处理点击事件"""
+        if self.command:
+            fraction = event.y / self.winfo_height()
+            self.command('moveto', fraction)
+    def _on_drag(self, event):
+        """处理拖动事件"""
+        if self.command:
+            fraction = event.y / self.winfo_height()
+            self.command('moveto', fraction)
+    
+    def set(self, first, last):
+        """设置滚动条位置"""
+        first = float(first)
+        last = float(last)
+        height = self.winfo_height()
+        top = height * first
+        bottom = height * last
+        self._offset = top
+        self._create_scroll_bar()
+    def configure(self, **kwargs):
+        """配置滚动条"""
+        if 'command' in kwargs:
+            self.command = kwargs.pop('command')
+        super().configure(**kwargs)
+
+class RoundedButton(tk.Frame):
+    """圆角按钮"""
+    def __init__(self, parent, text, command=None, **kwargs):
+        super().__init__(parent, bg=kwargs.get('bg', '#2b2b2b'))
+        
+        # 提取样式参数
+        bg_color = kwargs.get('bg', '#2b2b2b')
+        fg_color = kwargs.get('fg', 'white')
+        active_bg = kwargs.get('activebackground', bg_color)
+        active_fg = kwargs.get('activeforeground', fg_color)
+        width = kwargs.get('width', 10)  # 将默认宽度从 20 改为 10
+        height = kwargs.get('height', 2)
+        font = kwargs.get('font', ('Microsoft YaHei', 9))
+        
+        # 创建圆角框架
+        self.frame = tk.Frame(
+            self,
+            bg=bg_color,
+            highlightbackground=kwargs.get('highlightbackground', bg_color),
+            highlightthickness=kwargs.get('highlightthickness', 1),
+            bd=0
+        )
+        self.frame.pack(expand=True, fill="both", padx=2, pady=2)
+        
+        # 创建按钮
+        self.button = tk.Button(
+            self.frame,
+            text=text,
+            command=command,
+            bg=bg_color,
+            fg=fg_color,
+            activebackground=active_bg,
+            activeforeground=active_fg,
+            relief="flat",
+            cursor="hand2",
+            width=width,
+            height=height,
+            font=font,
+            bd=0
+        )
+        self.button.pack(expand=True, fill="both", padx=1, pady=1)
+        
+        # 绑定事件
+        self.button.bind('<Enter>', self._on_enter)
+        self.button.bind('<Leave>', self._on_leave)
+        
+    def _on_enter(self, event):
+        """鼠标进入时的效果"""
+        self.frame.configure(highlightbackground=self.button.cget('activebackground'))
+        
+    def _on_leave(self, event):
+        """鼠标离开时的效果"""
+        self.frame.configure(highlightbackground=self.button.cget('bg'))
+        
+    def configure(self, **kwargs):
+        """配置按钮属性"""
+        self.button.configure(**kwargs)
+        if 'bg' in kwargs:
+            self.frame.configure(bg=kwargs['bg'])
+            
+    def cget(self, key):
+        """获取按钮属性"""
+        return self.button.cget(key)
+
+class FolderAccessTool:
+    VERSION = "1.0.0"
+    
+    # 扩展支持的文件格式
+    SUPPORTED_FORMATS = {
+        "图片": [
+            ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp", 
+            ".ico", ".svg", ".raw", ".heic", ".psd", ".ai"
+        ],
+        "视频": [
+            ".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm",
+            ".m4v", ".mpg", ".mpeg", ".3gp", ".rmvb", ".ts", ".vob"
+        ],
+        "音频": [
+            ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".wma",
+            ".mid", ".midi", ".ape", ".alac", ".aiff", ".opus"
+        ],
+        "文档": [
+            ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+            ".txt", ".rtf", ".csv", ".xml", ".json", ".md", ".epub",
+            ".mobi", ".azw3", ".djvu"
+        ],
+        "压缩包": [
+            ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz",
+            ".iso", ".img", ".dmg", ".pkg"
+        ],
+        "代码": [
+            ".py", ".java", ".cpp", ".c", ".h", ".js", ".html", ".css",
+            ".php", ".rb", ".go", ".rs", ".swift", ".kt", ".ts",
+            ".sql", ".sh", ".bat", ".ps1"
+        ],
+        "字体": [
+            ".ttf", ".otf", ".woff", ".woff2", ".eot", ".fon"
+        ],
+        "3D模型": [
+            ".obj", ".fbx", ".3ds", ".max", ".blend", ".dae",
+            ".stl", ".ply", ".glb", ".gltf", ".usd", ".abc"
+        ],
+        "设计": [
+            ".sketch", ".fig", ".xd", ".ai", ".eps", ".indd",
+            ".dwg", ".dxf", ".skp",
+            ".psd",     # Photoshop
+            ".ai",      # Illustrator
+            ".indd",    # InDesign
+            ".xd",      # XD
+            # 3D 设计
+            ".c4d",     # Cinema 4D
+            ".ma",      # Maya ASCII
+            ".mb",      # Maya Binary
+            ".hip",     # Houdini
+            ".hipnc",   # Houdini Non Commercial
+            ".blend",   # Blender
+            # 其他设计软件
+            ".sketch",  # Sketch
+            ".fig",     # Figma
+            ".xcf",     # GIMP
+            ".kra",     # Krita
+            ".clip",    # Clip Studio Paint
+            ".cdr",     # CorelDRAW
+            # CAD
+            ".dwg",     # AutoCAD
+            ".dxf",     # AutoCAD Exchange
+            ".skp",     # SketchUp
+            # 材质和贴图
+            ".sbsar",   # Substance Designer
+            ".sbs",     # Substance Source
+        ],
+        "工程文件": [
+            # After Effects
+            ".aep",     # After Effects 工程文件
+            ".aepx",    # After Effects XML 工程文件
+            # Premiere Pro
+            ".prproj",  # Premiere Pro 项目
+            # Final Cut Pro
+            ".fcpx",    # Final Cut Pro X 项目
+            ".fcpxml",  # Final Cut Pro XML
+            # DaVinci Resolve
+            ".drp",     # DaVinci Resolve
+            ".drt",     # DaVinci Resolve 模板
+            # Vegas Pro
+            ".veg",     # Vegas Pro 项目
+            ".vf",      # Vegas Pro 效果预设
+            # 特效模板
+            ".mogrt",   # Motion Graphics Template
+            # Unreal Engine
+            ".uproject", # Unreal Engine 工程文件
+        ],
+    }
+
+    # 添加文件类型对应的图标
+    FILE_TYPE_ICONS = {
+        "图片": "🖼️",
+        "视频": "🎬",
+        "音频": "🎵",
+        "文档": "📄",
+        "压缩包": "📦",
+        "代码": "💻",
+        "字体": "📝",
+        "3D模型": "🎮",
+        "设计": "🎨",
+        "工程文件": "🎬",  # 改用视频编辑图标
+    }
+    
+    # 保持原有的字体设置
+    FONT_FAMILY = "Microsoft YaHei"
+    FONT_NORMAL = ("Microsoft YaHei", 9)
+    FONT_BOLD = ("Microsoft YaHei", 11, "bold")
+    FONT_TITLE = ("Microsoft YaHei", 10)
+    
+    # 添加特殊软件路径搜索配置
+    SPECIAL_SOFTWARE_PATHS = {
+        "Logitech G HUB": {
+            "name": "Logitech G HUB",
+            "possible_paths": [
+                "C:\\Program Files\\LGHUB\\lghub.exe",
+                "C:\\Program Files (x86)\\LGHUB\\lghub.exe",
+                os.path.expandvars("%LOCALAPPDATA%\\LGHUB\\lghub.exe")
+            ],
+            "icon": "🎮"
+        },
+        "FastStone Capture": {
+            "name": "FastStone Capture",
+            "possible_paths": [
+                "C:\\Program Files\\FastStone Capture\\FSCapture.exe",
+                "C:\\Program Files (x86)\\FastStone Capture\\FSCapture.exe"
+            ],
+            "icon": "📸"
+        },
+        "Steam Games": {
+            "name": "Steam Games",
+            "possible_paths": [
+                "C:\\Program Files (x86)\\Steam\\steamapps\\common",
+                "C:\\Program Files\\Steam\\steamapps\\common",
+                "D:\\Steam\\steamapps\\common",
+                "E:\\Steam\\steamapps\\common"
+            ],
+            "icon": "🎮"
+        },
+        "Epic Games": {
+            "name": "Epic Games",
+            "possible_paths": [
+                "C:\\Program Files\\Epic Games",
+                "C:\\Program Files (x86)\\Epic Games",
+                "D:\\Epic Games",
+                "E:\\Epic Games"
+            ],
+            "icon": "🎮"
+        }
+    }
+    
+    # 添加图片预览窗口的配置
+    IMAGE_PREVIEW_SIZE = (200, 200)  # 预览窗口大小
+    
+    # 添加按钮样式到类属性
+    BUTTON_STYLES = {
+        "folder": {
+            "bg": "#4c5052",
+            "active_bg": "#5c6062",
+            "icon": "📁"
+        },
+        "program": {
+            "bg": "#2d4052",
+            "active_bg": "#3d5062",
+            "icon": "💻"
+        },
+        "video": {
+            "bg": "#3d524c",
+            "active_bg": "#4d625c",
+            "icon": "🖼"  # 修改视频图标
+        },
+        "image": {
+            "bg": "#3d524c",
+            "active_bg": "#4d625c",
+            "icon": "🖼"  # 统一图片图标
+        },
+        "document": {
+            "bg": "#4c4d52",
+            "active_bg": "#5c5d62",
+            "icon": "📄"
+        },
+        "web": {  # 修改网页按钮样式
+            "bg": "#524c52",  # 紫色系
+            "active_bg": "#625c62",
+            "icon": "🌐"
+        },
+        "project": {
+            "bg": "#2d4052",
+            "active_bg": "#3d5062",
+            "icon": "🎬"  # 改用视频编辑图标
+        },
+        "design": {  # 添加设计文件的样式
+            "bg": "#524C52",
+            "active_bg": "#625C62",
+            "icon": "🎨"
+        },
+    }
+    
+    def __init__(self):
+        # 添加安全性检查
+        self._verify_environment()
+        
+        self.root = _initialize_tkdnd()
+        self.root.title("QuickLaunch")
+        
+        # 在类初始化时定义配置文件路径
+        self.config_dir = os.path.join(os.getenv('APPDATA'), 'FolderQuickAccess')
+        self.config_file = os.path.join(self.config_dir, 'paths.json')
+        
+        # 确保配置目录存在
+        if not os.path.exists(self.config_dir):
+            os.makedirs(self.config_dir)
+        
+        # 加载保存的路径
+        self.paths_data = self._load_paths()
+        
+        # 设置窗口大小和位置
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        window_width = 500
+        window_height = 730
+        
+        # 计算窗口位置
+        x = 20
+        y = 20
+        
+        # 设置窗口大小和位置
+        self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
+        self.root.configure(bg="#2b2b2b")
+        
+        # 设置窗口最小和最大尺寸
+        self.root.minsize(400, 500)
+        self.root.maxsize(800, screen_height - 100)
+        
+        # 先隐藏窗口
+        self.root.withdraw()
+        
+        # 修改图标路径
+        # 获取程序运行路径
+        if getattr(sys, 'frozen', False):
+            # 如果是打包后的exe
+            application_path = os.path.dirname(sys.executable)
+        else:
+            # 如果是直接运行的py文件
+            application_path = os.path.dirname(os.path.abspath(__file__))
+        
+        # 设置图标路径
+        self.icon_path = os.path.join(application_path, "czp.ico")
+        
+        # 只在图标文件存在时才设置图标
+        if os.path.exists(self.icon_path):
+            try:
+                self.root.iconbitmap(self.icon_path)
+                self.root.tk.call('wm', 'iconbitmap', self.root._w, self.icon_path)
+                print(f"图标设置成功: {self.icon_path}")
+            except Exception as e:
+                print(f"设置图标失败: {e}")
+                self.icon_path = None
+        else:
+            print(f"警告: 图标文件不存在: {self.icon_path}")
+            self.icon_path = None
+        
+        # 修改窗口样式设置
+        if os.name == 'nt':  # Windows系统
+            try:
+                from ctypes import windll
+                GWL_STYLE = -16
+                WS_MINIMIZEBOX = 0x00020000
+                style = windll.user32.GetWindowLongW(self.root.winfo_id(), GWL_STYLE)
+                style |= WS_MINIMIZEBOX
+                windll.user32.SetWindowLongW(self.root.winfo_id(), GWL_STYLE, style)
+            except:
+                pass
+        
+        self.add_dialog = None  # 用于存储添加路径的对话框
+        
+        # 居中窗口
+        self._center_window()
+        
+        # 移除自定义标题栏的创建
+        # self._create_title_bar()
+        
+        # 创建主框架
+        self.main_frame = tk.Frame(self.root, bg="#2b2b2b")
+        self.main_frame.pack(padx=20, pady=20, fill="both", expand=True)
+        
+        # 创建按钮显示区域的容器框架
+        buttons_container = tk.Frame(self.main_frame, bg="#2b2b2b")
+        buttons_container.pack(fill="both", expand=True, pady=(0, 10))
+        
+        # 创建画布和滚动条
+        self.canvas = tk.Canvas(buttons_container, bg="#2b2b2b", highlightthickness=0)
+        scrollbar = DarkScrollbar(buttons_container, width=10)
+        scrollbar.configure(command=self.canvas.yview)
+        
+        # 创建按钮显示区域
+        self.buttons_frame = tk.Frame(self.canvas, bg="#2b2b2b")
+        
+        # 配置画布
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+        
+        # 打包滚动条和画布
+        scrollbar.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+        
+        # 在画布上创建窗口
+        self.canvas_frame = self.canvas.create_window((0, 0), window=self.buttons_frame, anchor="nw")
+        
+        # 添加复制路径选项的状态变量
+        self.copy_path_enabled = tk.BooleanVar(value=False)
+        
+        # 添加置顶状态变量
+        self.is_topmost = tk.BooleanVar(value=False)
+        
+        # 添加临时笔记状态变量
+        self.note_enabled = tk.BooleanVar(value=False)
+        
+        # 创建工具栏（放在下方）
+        self._create_toolbar()
+        
+        # 添加窗口大小调整区域
+        self._create_resize_area()
+        
+        # 确保窗口尺寸已更新
+        self.root.update_idletasks()
+        
+        # 创建按钮
+        self._create_path_buttons()
+        
+        # 再次强制更新所有控件的布局
+        self.root.update_idletasks()
+        self.main_frame.update_idletasks()
+        self.buttons_frame.update_idletasks()
+        self.canvas.update_idletasks()
+        
+        # 确保画布宽度正确
+        self.canvas.itemconfig(self.canvas_frame, width=self.canvas.winfo_width())
+        
+        # 显示窗口
+        self.root.deiconify()
+        
+        # 延迟一个短暂时间后再次更新布局
+        self.root.after(100, self._delayed_layout_update)
+        
+        # 绑定事件
+        self.buttons_frame.bind("<Configure>", self._on_frame_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        
+        # 绑定整个窗口的拖动
+        self._bind_window_move(self.root)
+        
+        # 在原有的初始化代码后添加
+        self.preview_window = None
+        
+        # 在原有的初始化代码后添加
+        self.hot_corner_active = False
+        self.hot_corner_size = 5  # 热区大小（像素）
+        self.check_interval = 100  # 检查间隔（毫秒）
+        
+        # 创建热区检测器（确保始终置顶）
+        self._create_hot_corner_detector()
+        
+        # 绑定最小化事件
+        self.root.bind("<Unmap>", self._on_minimize)
+        self.root.bind("<Map>", self._on_restore)
+        
+        # 设置日志系统
+        self._setup_logging()
+        
+        # 添加缓存机制
+        self._icon_cache = {}
+        self._path_info_cache = {}
+        
+        # 设置快捷键（只保留必要的快捷键）
+        self._setup_hotkeys()
+        
+        # 添加窗口位置跟踪
+        self._last_window_pos = (self.root.winfo_x(), self.root.winfo_y())
+        self._last_window_size = (self.root.winfo_width(), self.root.winfo_height())
+        
+        # 修改窗口大小变化的事件绑定
+        self.root.bind('<Configure>', self._on_window_configure)
+        
+        # 添加剪贴板监听
+        self.root.bind_all('<Control-v>', self._handle_paste)  # 使用 bind_all 而不是 bind
+        
+        # 添加笔记文件路径
+        self.notes_file = os.path.join(self.config_dir, 'notes.txt')
+        
+        
+        # 加载保存的笔记
+        self._load_notes()
+        
+        # 添加清理计时器
+        self._cleanup_timer = None
+        self._setup_cleanup_timer()
+        
+        # 添加拖拽排序相关的属性
+        self.drag_source = None
+        self.drag_target = None
+        self.drag_indicator = None
+        
+        # 添加消息提示相关属性
+        self.msg_window = None
+        self.msg_timer = None
+    def _setup_cleanup_timer(self):
+        """设置定期清理定时器"""
+        if self._cleanup_timer:
+            self.root.after_cancel(self._cleanup_timer)
+        
+        self._cleanup_memory()
+        self._cleanup_timer = self.root.after(300000, self._setup_cleanup_timer)  # 每5分钟清理一次
+    def _cleanup_memory(self):
+        """清理内存"""
+        # 清理图标缓存
+        if hasattr(self, '_icon_cache'):
+            self._icon_cache.clear()
+        
+        # 清理路径信息缓存
+        if hasattr(self, '_path_info_cache'):
+            self._path_info_cache.clear()
+        
+        # 强制垃圾回收
+        gc.collect()
+    def _verify_environment(self):
+        """验证运行环境"""
+        try:
+            # 添加更多的安全性检查
+            if not os.name == 'nt':
+                raise SystemError("仅支持Windows系统")
+            
+            # 检查必要的系统目录是否存在
+            system_dirs = [
+                os.environ.get('SYSTEMROOT'),
+                os.environ.get('PROGRAMFILES'),
+                os.environ.get('APPDATA'),
+                os.environ.get('LOCALAPPDATA')  # 添加本地应用数据目录检查
+            ]
+            
+            if not all(system_dirs):
+                raise SystemError("系统环境异常")
+            
+            # 检查配置目录权限
+            config_dir = os.path.join(os.environ.get('APPDATA'), 'FolderQuickAccess')
+            if not os.path.exists(config_dir):
+                try:
+                    os.makedirs(config_dir)
+                except:
+                    raise PermissionError("无法创建配置目录")
+            
+            # 检查写入权限
+            test_path = os.path.join(config_dir, 'test.txt')
+            try:
+                with open(test_path, 'w') as f:
+                    f.write('test')
+                os.remove(test_path)
+            except:
+                raise PermissionError("缺少必要的文件访问权限")
+                
+            # 检查临时目录访问权限
+            temp_dir = os.environ.get('TEMP')
+            if not (temp_dir and os.access(temp_dir, os.W_OK)):
+                raise PermissionError("无法访问临时目录")
+                
+        except Exception as e:
+            logging.error(f"环境验证失败: {e}")
+            self._show_message(f"环境检查失败: {str(e)}")
+            sys.exit(1)
+    def _setup_logging(self):
+        """配置日志系统"""
+        log_dir = os.path.join(self.config_dir, 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        
+        log_file = os.path.join(log_dir, f'quicklaunch_{datetime.now().strftime("%Y%m%d")}.log')
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_file, encoding='utf-8'),
+                logging.StreamHandler()
+            ]
+        )
+    def _center_window(self):
+        """将窗口位置调整到屏幕左上角"""
+        # 修改这里的窗口尺寸
+        window_width = 500    # 从 560 改为 530 (-30)
+        window_height = 730   # 保持高度不变
+        
+        # 设置位置：靠近左上角，但留出一点边距
+        x = 20  # 距离左边缘20像素
+        y = 20  # 距离上边缘20像素
+        
+        # 设置窗口位置和大小
+        self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
+        
+        # 设置窗口最小尺寸
+        self.root.minsize(400, 500)
+    def _bind_window_move(self, widget):
+        """绑定窗口拖动事件到指定widget"""
+        def start_move(event):
+            # 如果点击的是按钮、菜单或文本框，不启动窗口移动
+            if (isinstance(event.widget, (tk.Button, tk.Menu, tk.Text)) or 
+                hasattr(event.widget, 'master') and isinstance(event.widget.master, RoundedButton)):
+                return
+            
+            # 保存初始位置
+            widget._drag_start_x = event.x
+            widget._drag_start_y = event.y
+            
+        def do_move(event):
+            # 如果没有开始拖动或点击的是按钮、菜单或文本框，不处理
+            if (not hasattr(widget, '_drag_start_x') or 
+                isinstance(event.widget, (tk.Button, tk.Menu, tk.Text)) or 
+                hasattr(event.widget, 'master') and isinstance(event.widget.master, RoundedButton)):
+                return
+            
+            # 计算位移
+            dx = event.x - widget._drag_start_x
+            dy = event.y - widget._drag_start_y
+            
+            # 获取窗口当前位置
+            x = self.root.winfo_x() + dx
+            y = self.root.winfo_y() + dy
+            
+            # 确保窗口不会移出屏幕
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            window_width = self.root.winfo_width()
+            window_height = self.root.winfo_height()
+            
+            # 限制窗口位置
+            x = max(0, min(x, screen_width - window_width))
+            y = max(0, min(y, screen_height - window_height))
+            
+            # 移动窗口
+            self.root.geometry(f"+{x}+{y}")
+            
+        def stop_move(event):
+            # 清除拖动状态
+            if hasattr(widget, '_drag_start_x'):
+                del widget._drag_start_x
+                del widget._drag_start_y
+        
+        # 绑定事件
+        widget.bind('<Button-1>', start_move)
+        widget.bind('<B1-Motion>', do_move)
+        widget.bind('<ButtonRelease-1>', stop_move)
+        
+        # 为所有子组件也绑定这些事件，但排除文本框
+        for child in widget.winfo_children():
+            if not isinstance(child, (tk.Button, tk.Menu, tk.Text)):
+                child.bind('<Button-1>', start_move)
+                child.bind('<B1-Motion>', do_move)
+                child.bind('<ButtonRelease-1>', stop_move)
+    def _create_toolbar(self):
+        """创建工具栏"""
+        # 创建工具栏（放在最下方）
+        toolbar = tk.Frame(self.main_frame, bg="#2b2b2b")
+        toolbar.pack(side="bottom", fill="x", pady=(0, 0))
+        
+        # 创建笔记区域容器
+        self.note_container = tk.Frame(toolbar, bg="#2b2b2b")
+        self.note_container.pack_propagate(False)  # 防止自动调整大小
+        
+        # 创建输入框
+        self.temp_input = tk.Text(
+            self.note_container,
+            bg="#1e1e1e",
+            fg="white",
+            insertbackground="white",
+            relief="flat",
+            font=self.FONT_NORMAL,
+            height=3,
+            width=1,
+            wrap=tk.WORD
+        )
+        self.temp_input.pack(fill="both", expand=True, padx=5, pady=3)
+        
+        # 添加新的粘贴事件处理
+        def handle_note_paste(event):
+            # 只有当笔记功能启用时才处理粘贴
+            if self.note_enabled.get():
+                return None  # 允许默认粘贴行为
+            return "break"  # 阻止粘贴到笔记
+        
+        self.temp_input.bind('<Control-v>', handle_note_paste)
+        
+        # 添加自动保存功能
+        def auto_save(event=None):
+            if self.note_enabled.get():
+                self._save_notes()
+        
+        # 绑定按键事件和失去焦点事件来触发保存
+        self.temp_input.bind('<KeyRelease>', auto_save)
+        self.temp_input.bind('<FocusOut>', auto_save)
+        
+        # 添加提示文本
+        self.temp_input.insert("1.0", "临时笔记...")
+        self.temp_input.config(fg='gray')
+        
+        # 修改焦点事件处理
+        def on_focus_in(event):
+            if self.temp_input.get("1.0", "end-1c").strip() == "临时笔记...":
+                self.temp_input.delete("1.0", tk.END)
+                self.temp_input.config(fg='white')
+        
+        def on_focus_out(event):
+            current_text = self.temp_input.get("1.0", "end-1c").strip()
+            if not current_text:
+                self.temp_input.delete("1.0", tk.END)
+                self.temp_input.insert("1.0", "临时笔记...")
+                self.temp_input.config(fg='gray')
+            else:
+                self._save_notes()  # 失去焦点时保存
+        
+        # 绑定事件
+        self.temp_input.bind('<FocusIn>', on_focus_in)
+        self.temp_input.bind('<FocusOut>', on_focus_out)
+        
+        # 创建按钮容器
+        button_container = tk.Frame(toolbar, bg="#2b2b2b", height=40)
+        button_container.pack(side="bottom", fill="x", pady=5)
+        button_container.pack_propagate(False)
+        
+        buttons_frame = tk.Frame(button_container, bg="#2b2b2b")
+        buttons_frame.pack(expand=True)
+        
+        # 添加清空按钮
+        clear_btn = RoundedButton(
+            buttons_frame,
+            text="清空",
+            command=self._clear_all_shortcuts,
+            bg="#B85959",
+            fg="white",
+            activebackground="#C86666",
+            activeforeground="white",
+            relief="flat",
+            cursor="hand2",
+            font=self.FONT_NORMAL,
+            width=4,  # 增加宽度从2到4
+            height=1
+        )
+        clear_btn.pack(side="left", padx=5)
+        
+        # 添加复制路径选项
+        copy_checkbox = tk.Checkbutton(
+            buttons_frame,
+            text="路径复制",  # 将 "Copy Path" 改为 "路径复制"
+            variable=self.copy_path_enabled,
+            bg="#2b2b2b",
+            fg="white",
+            selectcolor="#2b2b2b",
+            activebackground="#2b2b2b",
+            activeforeground="white",
+            font=self.FONT_NORMAL
+        )
+        copy_checkbox.pack(side="left", padx=10)
+        
+        # 添加置顶选项
+        topmost_checkbox = tk.Checkbutton(
+            buttons_frame,
+            text="置顶",
+            variable=self.is_topmost,
+            command=self._toggle_topmost,
+            bg="#2b2b2b",
+            fg="white",
+            selectcolor="#2b2b2b",
+            activebackground="#2b2b2b",
+            activeforeground="white",
+            font=self.FONT_NORMAL
+        )
+        topmost_checkbox.pack(side="left", padx=10)
+        
+        # 添加临时笔记选项
+        note_checkbox = tk.Checkbutton(
+            buttons_frame,
+            text="笔记",
+            variable=self.note_enabled,
+            command=self._toggle_note,
+            bg="#2b2b2b",
+            fg="white",
+            selectcolor="#2b2b2b",
+            activebackground="#2b2b2b",
+            activeforeground="white",
+            font=self.FONT_NORMAL
+        )
+        note_checkbox.pack(side="left", padx=10)
+        
+        # 在按钮容器中添加排序按钮（在清空按钮旁边）
+        sort_btn = RoundedButton(
+            buttons_frame,
+            text="排序",
+            command=self._show_sort_dialog,
+            bg="#4c5052",
+            fg="white",
+            activebackground="#5c6062",
+            activeforeground="white",
+            relief="flat",
+            cursor="hand2",
+            font=self.FONT_NORMAL,
+            width=4,  # 增加宽度从2到4
+            height=1
+        )
+        sort_btn.pack(side="left", padx=5)
+    def _clear_all_shortcuts(self):
+        """清空所有快捷方式"""
+        try:
+            # 创建确认对话框
+            confirm_window = tk.Toplevel(self.root)
+            confirm_window.title("确认清空")
+            confirm_window.configure(bg="#2b2b2b")
+            confirm_window.transient(self.root)
+            
+            # 设置窗口大小和位置
+            window_width = 300
+            window_height = 120
+            x = self.root.winfo_x() + (self.root.winfo_width() - window_width) // 2
+            y = self.root.winfo_y() + (self.root.winfo_height() - window_height) // 2
+            confirm_window.geometry(f"{window_width}x{window_height}+{x}+{y}")
+            
+            # 添加警告文本
+            warning_label = tk.Label(
+                confirm_window,
+                text="确定要清空所有快捷方式吗？\n此操作不可撤销！",
+                bg="#2b2b2b",
+                fg="#E81123",
+                font=self.FONT_BOLD
+            )
+            warning_label.pack(pady=10)
+            
+            # 创建按钮容器
+            btn_frame = tk.Frame(confirm_window, bg="#2b2b2b")
+            btn_frame.pack(pady=10)
+            
+            # 确认按钮
+            def confirm_clear():
+                self.paths_data = {}  # 清空数据
+                self._save_paths()    # 保存空数据
+                self._create_path_buttons()  # 刷新界面
+                confirm_window.destroy()
+                self._show_message("已清空所有快捷方式!")
+            
+            confirm_btn = tk.Button(
+                btn_frame,
+                text="确认清空",
+                command=confirm_clear,
+                bg="#E81123",
+                fg="white",
+                activebackground="#FF1A1A",
+                activeforeground="white",
+                relief="flat",
+                cursor="hand2",
+                font=self.FONT_NORMAL
+            )
+            confirm_btn.pack(side="left", padx=10)
+            
+            # 取消按钮
+            cancel_btn = tk.Button(
+                btn_frame,
+                text="取消",
+                command=confirm_window.destroy,
+                bg="#4c5052",
+                fg="white",
+                activebackground="#5c6062",
+                activeforeground="white",
+                relief="flat",
+                cursor="hand2",
+                font=self.FONT_NORMAL
+            )
+            cancel_btn.pack(side="left", padx=10)
+            
+            # 设置焦点并使窗口置顶
+            confirm_window.focus_set()
+            confirm_window.grab_set()
+            
+        except Exception as e:
+            print(f"Error in clear shortcuts: {e}")
+            self._show_message("清空失败!")
+    def _show_add_dialog(self):
+        """显示添加路径对话框"""
+        if self.add_dialog:
+            return
+            
+        self.add_dialog = tk.Toplevel(self.root)
+        self.add_dialog.title("Add Path")
+        self.add_dialog.geometry("300x200")
+        self.add_dialog.configure(bg="#2b2b2b")
+        self.add_dialog.transient(self.root)
+        
+        # 对话框内容框架
+        dialog_frame = tk.Frame(self.add_dialog, bg="#2b2b2b")
+        dialog_frame.pack(padx=20, pady=20, fill="both", expand=True)
+        
+        # 路径输入框
+        path_label = tk.Label(
+            dialog_frame,
+            text="Path:",
+            bg="#2b2b2b",
+            fg="white",
+            font=self.FONT_TITLE
+        )
+        path_label.pack(anchor="w")
+        
+        path_entry = tk.Entry(
+            dialog_frame,
+            bg="#1e1e1e",
+            fg="white",
+            insertbackground="white",
+            relief="flat",
+            highlightbackground="#1e1e1e",
+            highlightcolor="#4c5052",
+            highlightthickness=1
+        )
+        path_entry.pack(fill="x", pady=(0, 10))
+        
+        # 按钮名称输入框
+        name_label = tk.Label(
+            dialog_frame,
+            text="Button Name:",
+            bg="#2b2b2b",
+            fg="white",
+            font=self.FONT_TITLE
+        )
+        name_label.pack(anchor="w")
+        
+        name_entry = tk.Entry(
+            dialog_frame,
+            bg="#1e1e1e",
+            fg="white",
+            insertbackground="white",
+            relief="flat",
+            highlightbackground="#1e1e1e",
+            highlightcolor="#4c5052",
+            highlightthickness=1
+        )
+        name_entry.pack(fill="x", pady=(0, 10))
+        
+        # 按钮框架
+        btn_frame = tk.Frame(dialog_frame, bg="#2b2b2b")
+        btn_frame.pack(fill="x", pady=(10, 0))
+        
+        # 浏览按钮
+        browse_btn = tk.Button(
+            btn_frame,
+            text="Browse",
+            command=lambda: self._browse_path(path_entry),
+            bg="#4c5052",
+            fg="white",
+            activebackground="#5c6062",
+            activeforeground="white",
+            relief="flat",
+            cursor="hand2",
+            font=self.FONT_NORMAL
+        )
+        browse_btn.pack(side="left", padx=5)
+        
+        # 确认按钮
+        confirm_btn = tk.Button(
+            btn_frame,
+            text="Add",
+            command=lambda: self._confirm_add(path_entry.get(), name_entry.get()),
+            bg="#4c5052",
+            fg="white",
+            activebackground="#5c6062",
+            activeforeground="white",
+            relief="flat",
+            cursor="hand2",
+            font=self.FONT_NORMAL
+        )
+        confirm_btn.pack(side="left", padx=5)
+        
+        def on_dialog_close():
+            self.add_dialog.destroy()
+            self.add_dialog = None
+            
+        self.add_dialog.protocol("WM_DELETE_WINDOW", on_dialog_close)
+        self.add_dialog.grab_set()
+    def _create_path_buttons(self):
+        """创建路径按钮"""
+        try:
+            # 清除现有按钮
+            for widget in self.buttons_frame.winfo_children():
+                widget.destroy()
+            
+            # 如果没有任何按钮，显示软件说明
+            if not self.paths_data:
+                # 创建说明文本框架
+                guide_frame = tk.Frame(self.buttons_frame, bg="#2b2b2b")
+                guide_frame.pack(expand=True, fill="both", padx=20, pady=20)
+                
+                # 软件说明文本
+                guide_text = '''欢迎使用 QuickLaunch 快速启动工具
+
+使用方法：
+• 拖放文件夹、程序、快捷方式到窗口即可添加
+• 右键点击按钮可以删除或重命名
+• 点击按钮直接打开对应项目
+
+支持的文件类型：
+• 视频编辑： AE、PR、达芬奇等项目文件
+• 3D设计：UE、Maya、Houdini、C4D、Blender 项目文件
+• 2D设计：PS、AI、XD、Sketch、等设计文件
+• 常用文件：图片、视频、音频、文档、压缩包等
+• 开发相关：3D模型文件、代码文件、字体文件
+
+快捷操作：
+• Ctrl+V：粘贴网址添加网页快捷方式
+• Esc：最小化到左上角
+• 最小化后点击屏幕最左上角可快速呼出软件
+• 勾选"路径复制"可复制路径而不是打开
+• 勾选"置顶"可以让窗口保持在最上层
+• 勾选"笔记"可以显示临时记事本
+
+自定义功能：
+• 右键菜单中可选择多种预设颜色
+• 拖动按钮可以自由调整顺序
+• 窗口大小可以自由调整
+• 支持多列自动布局
+
+💡 提示：拖放任何文件到此处开始使用'''
+                
+                # 创建文本标签
+                guide_label = tk.Label(
+                    guide_frame,
+                    text=guide_text,
+                    justify=tk.LEFT,
+                    bg="#2b2b2b",
+                    fg="#666666",  # 使用暗灰色
+                    font=("Microsoft YaHei", 10),
+                    padx=10,
+                    pady=10
+                )
+                guide_label.pack(expand=True, fill="both")
+                return
+            
+            # 创建网格布局框架
+            grid_frame = tk.Frame(self.buttons_frame, bg="#2b2b2b")
+            grid_frame.pack(expand=True, fill="both", padx=5)
+            
+            # 强制更新以获取正确的宽度
+            self.root.update_idletasks()
+            self.buttons_frame.update_idletasks()
+            grid_frame.update_idletasks()
+            
+            # 获取实际可用宽度
+            available_width = self.buttons_frame.winfo_width() - 10  # 减去左右边距
+            
+            # 根据窗口宽度确定列数和按钮宽度
+            if available_width >= 450:  # 三列的阈值
+                buttons_per_row = 3
+                button_width = max(8, (available_width - 20) // (3 * 8))  # 动态计算按钮宽度
+                padding = 3
+            elif available_width >= 300:  # 两列的阈值
+                buttons_per_row = 2
+                button_width = max(10, (available_width - 15) // (2 * 8))  # 动态计算按钮宽度
+                padding = 4
+            else:  # 单列
+                buttons_per_row = 1
+                button_width = max(15, (available_width - 10) // 8)  # 动态计算按钮宽度
+                padding = 5
+            
+            # 确保按钮能够填满整行
+            total_buttons = len(self.paths_data)
+            if total_buttons <= buttons_per_row:
+                # 如果按钮数量小于等于每行按钮数，调整为平均分布
+                buttons_per_row = total_buttons
+                button_width = max(10, (available_width - (buttons_per_row + 1) * padding * 2) // (buttons_per_row * 8))
+            
+            # 配置网格列的权重，使按钮平均分布
+            for i in range(buttons_per_row):
+                grid_frame.grid_columnconfigure(i, weight=1)
+            
+            # 创建按钮时使用计算出的宽度
+            for index, (name, path) in enumerate(self.paths_data.items()):
+                try:
+                    row = index // buttons_per_row
+                    col = index % buttons_per_row
+                    
+                    # 创建按钮框架
+                    button_frame = tk.Frame(grid_frame, bg="#2b2b2b")
+                    button_frame.grid(row=row, column=col, padx=padding, pady=padding, sticky="nsew")
+                    
+                    # 存储按钮信息用于排序
+                    button_frame.path_name = name
+                    button_frame.path_data = path
+                    
+                    # 从名称中移除任何已存在的图标和前缀
+                    clean_name = name
+                    for icon in self.FILE_TYPE_ICONS.values():
+                        clean_name = clean_name.replace(icon, '').strip()
+                    # 移除已存在的 AE: 和 UE: 前缀
+                    clean_name = re.sub(r'^(AE|UE):\s*', '', clean_name)
+                    
+                    # 确定按钮类型和样式
+                    if path.startswith("web:"):
+                        style = self.BUTTON_STYLES["web"]
+                    elif path.startswith("program:"):
+                        style = self.BUTTON_STYLES["program"]
+                    elif path.startswith("file:"):
+                        file_info = json.loads(path[5:])
+                        if file_info['type'] == "工程文件":
+                            style = self.BUTTON_STYLES["project"]
+                            # 根据扩展名添加特定标识（只在这里添加一次前缀）
+                            if file_info['path'].lower().endswith('.aep'):
+                                clean_name = f"AE: {clean_name}"
+                            elif file_info['path'].lower().endswith('.uproject'):
+                                clean_name = f"UE: {clean_name}"
+                        elif file_info['type'] == "视频":
+                            style = self.BUTTON_STYLES["video"]
+                        elif file_info['type'] == "图片":
+                            style = self.BUTTON_STYLES["image"]
+                        else:
+                            style = self.BUTTON_STYLES["document"]
+                    else:
+                        style = self.BUTTON_STYLES["folder"]
+                    
+                    # 获取自定义颜色
+                    custom_colors = None
+                    if isinstance(path, str):
+                        if path.startswith(('program:', 'file:', 'web:')):
+                            try:
+                                data = json.loads(path.split(':', 1)[1])
+                                custom_colors = data.get('colors')
+                            except:
+                                pass
+                        elif path.startswith('folder:'):
+                            try:
+                                data = json.loads(path.split(':', 1)[1])
+                                custom_colors = data.get('colors')
+                            except:
+                                pass
+                        else:
+                            # 检查是否是直接的文件夹路径
+                            try:
+                                if os.path.exists(path):
+                                    custom_colors = None
+                            except:
+                                pass
+
+                    # 使用自定义颜色或默认样式
+                    button_bg = custom_colors['bg'] if custom_colors else style["bg"]
+                    button_active_bg = custom_colors['active_bg'] if custom_colors else style["active_bg"]
+
+                    # 创建按钮时使用对应的颜色
+                    btn = RoundedButton(
+                        button_frame,
+                        text=f"{style['icon']} {clean_name}",
+                        command=lambda p=path: self._on_button_click(p),
+                        bg=button_bg,  # 使用自定义颜色
+                        fg="white",
+                        activebackground=button_active_bg,  # 使用自定义颜色
+                        activeforeground="white",
+                        relief="flat",
+                        cursor="hand2",
+                        width=button_width,  # 使用计算出的宽度
+                        height=2,
+                        font=self.FONT_BOLD
+                    )
+                    btn.pack(fill="both", expand=True)
+                    
+                    # 创建右键菜单
+                    menu = tk.Menu(
+                        btn, 
+                        tearoff=0, 
+                        bg="#2b2b2b", 
+                        fg="white",
+                        activebackground="#4c5052", 
+                        activeforeground="white",
+                        font=self.FONT_NORMAL
+                    )
+                    
+                    # 添加重命名选项
+                    menu.add_command(
+                        label="重命名",
+                        command=lambda n=name: self._show_rename_dialog(n),
+                        font=self.FONT_NORMAL
+                    )
+                    
+                    # 添加颜色选择子菜单
+                    color_menu = tk.Menu(
+                        menu,
+                        tearoff=0,
+                        bg="#2b2b2b",
+                        fg="white",
+                        activebackground="#4c5052",
+                        activeforeground="white",
+                        font=self.FONT_NORMAL
+                    )
+                    
+                    # 修改颜色定义部分
+                    colors = {
+                        "默认": {"bg": style["bg"], "active_bg": style["active_bg"]},
+                        "蓝色": {"bg": "#2d4052", "active_bg": "#3d5062"},
+                        "深蓝": {"bg": "#1a2733", "active_bg": "#2a3743"},
+                        "天蓝": {"bg": "#2d5275", "active_bg": "#3d6285"},
+                        "绿色": {"bg": "#3d524c", "active_bg": "#4d625c"},
+                        "深绿": {"bg": "#2a3d38", "active_bg": "#3a4d48"},
+                        "青绿": {"bg": "#2d5252", "active_bg": "#3d6262"},
+                        "红色": {"bg": "#803333", "active_bg": "#994040"},
+                        "深红": {"bg": "#662424", "active_bg": "#803030"},
+                        "粉红": {"bg": "#804d5f", "active_bg": "#955d70"},
+                        "紫色": {"bg": "#524c52", "active_bg": "#625c62"},
+                        "深紫": {"bg": "#3d384d", "active_bg": "#4d485d"},
+                        "浅紫": {"bg": "#4a4d66", "active_bg": "#5a5d76"},
+                        "橙色": {"bg": "#805c3d", "active_bg": "#956c4d"},
+                        # 修改金色的颜色值
+                        "金色": {"bg": "#806633", "active_bg": "#997733"}  # 调整为更明显的金色
+                    }
+                    
+                    # 添加颜色选项到子菜单
+                    for color_name, color_values in colors.items():
+                        color_menu.add_command(
+                            label=color_name,
+                            command=lambda n=name, c=color_values: self._change_button_color(n, c),
+                            font=self.FONT_NORMAL,
+                            background=color_values["bg"],  # 设置菜单项的背景色
+                            foreground="white",  # 设置文字颜色为白色
+                            activebackground=color_values["active_bg"],  # 设置鼠标悬停时的背景色
+                            activeforeground="white"  # 设置鼠标悬停时的文字颜色
+                        )
+                    
+                    # 将颜色子菜单添加到主菜单
+                    menu.add_cascade(label="更改颜色", menu=color_menu)
+                    menu.add_separator()  # 添加分隔线
+                    
+                    # 添加删除选项
+                    menu.add_command(
+                        label="删除",
+                        command=lambda n=name: self.root.after(100, lambda: self._delete_path(n)),
+                        font=self.FONT_NORMAL
+                    )
+                    
+                    # 绑定右键菜单
+                    def show_menu(event, m=menu):
+                        try:
+                            m.post(event.x_root, event.y_root)
+                        except Exception as e:
+                            print(f"Show menu error: {e}")
+                    
+                    btn.bind("<Button-3>", show_menu)
+                    btn.button.bind("<Button-3>", show_menu)
+                    
+                    # 修改拖拽事件绑定
+                    btn.button.bind('<Button-1>', lambda e, bf=button_frame: self._start_drag(e, bf))
+                    btn.button.bind('<B1-Motion>', self._on_drag)
+                    btn.button.bind('<ButtonRelease-1>', self._end_drag)
+                    
+                    # 将按钮对象保存到框架中
+                    button_frame.button = btn
+                    
+                except Exception as e:
+                    print(f"Error creating button {index}: {e}")
+                    continue
+            
+            # 强制更新布局
+            grid_frame.update_idletasks()
+            self.buttons_frame.update_idletasks()
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+            
+        except Exception as e:
+            print(f"Error in _create_path_buttons: {e}")
+            raise
+    def _start_drag(self, event, button_frame):
+        """开始拖拽"""
+        # 检查是否按住了右键，如果是则不开始拖拽
+        if event.num == 3:  # 右键点击
+            return
+        
+        # 保存拖拽源和初始位置
+        self.drag_source = button_frame
+        self.drag_start_pos = (event.x_root, event.y_root)
+        
+        # 创建拖拽指示器
+        if self.drag_indicator:
+            self.drag_indicator.destroy()
+        self.drag_indicator = tk.Frame(self.buttons_frame, bg="#4c5052", height=2)
+        
+        # 高亮显示被拖拽的按钮
+        button_frame.configure(bg="#4c5052")
+
+    def _on_drag(self, event):
+        """拖拽过程中"""
+        if not self.drag_source or not hasattr(event, 'widget'):
+            return
+        
+        # 获取当前鼠标位置下的部件
+        target = event.widget.winfo_containing(event.x_root, event.y_root)
+        
+        # 向上查找直到找到按钮框架
+        while target and not hasattr(target, 'path_name'):
+            target = target.master
+        
+        if target and hasattr(target, 'path_name') and target != self.drag_source:
+            self.drag_target = target
+            
+            # 更新指示器位置
+            try:
+                target_y = target.winfo_y() + target.winfo_height()
+                self.drag_indicator.place(
+                    x=target.winfo_x(),
+                    y=target_y,
+                    width=target.winfo_width()
+                )
+                self.drag_indicator.lift()  # 确保指示器在最上层
+            except Exception as e:
+                print(f"更新指示器位置失败: {e}")
+
+    def _end_drag(self, event):
+        """结束拖拽"""
+        try:
+            if self.drag_source:
+                # 恢复拖拽源的背景色
+                self.drag_source.configure(bg="#2b2b2b")
+                
+                if self.drag_target and self.drag_source != self.drag_target:
+                    # 获取源和目标的索引
+                    source_name = self.drag_source.path_name
+                    target_name = self.drag_target.path_name
+                    
+                    # 重新排序
+                    self._reorder_buttons(source_name, target_name)
+        except Exception as e:
+            print(f"结束拖拽时出错: {e}")
+        finally:
+            # 清理
+            if self.drag_indicator:
+                self.drag_indicator.destroy()
+                self.drag_indicator = None
+            
+            self.drag_source = None
+            self.drag_target = None
+
+    def _reorder_buttons(self, source_name, target_name):
+        """重新排序按钮"""
+        try:
+            # 获取所有按钮的顺序
+            items = list(self.paths_data.items())
+            source_idx = next(i for i, (name, _) in enumerate(items) if name == source_name)
+            target_idx = next(i for i, (name, _) in enumerate(items) if name == target_name)
+            
+            # 移动项目
+            item = items.pop(source_idx)
+            items.insert(target_idx if target_idx > source_idx else target_idx, item)
+            
+            # 更新数据
+            self.paths_data = dict(items)
+            
+            # 保存新的顺序
+            self._save_paths()
+            
+            # 重新创建按钮
+            self._create_path_buttons()
+            
+            # 显示成功消息
+            self._show_message("排序完成!")
+            
+        except Exception as e:
+            print(f"重新排序失败: {e}")
+            self._show_message("排序失败!", important=True)  # 错误信息显示窗口
+    def _swap_buttons(self, button1, button2):
+        """交换两个按钮的位置"""
+        idx1 = list(self.paths_data.keys()).index(button1.path_name)
+        idx2 = list(self.paths_data.keys()).index(button2.path_name)
+        
+        if idx1 != idx2:
+            keys = list(self.paths_data.keys())
+            keys[idx1], keys[idx2] = keys[idx2], keys[idx1]
+            
+            new_paths_data = {}
+            for key in keys:
+                new_paths_data[key] = self.paths_data[key]
+            
+            self.paths_data = new_paths_data
+            self._create_path_buttons()
+    def _open_path(self, path):
+        """打开文件夹"""
+        try:
+            # 确保路径是绝对路径
+            abs_path = os.path.abspath(path)
+            print(f"尝试打开路径: {abs_path}")
+            
+            if os.path.exists(abs_path):
+                if os.path.isdir(abs_path):
+                    # 使用绝对路径打开文件夹，移除 check=True
+                    subprocess.run(['explorer', abs_path])
+                    return True  # 表示成功打开
+                else:
+                    print(f"路径不是文件夹: {abs_path}")
+                    self._show_message("无效的文件夹路径!")
+            else:
+                print(f"路径不存在: {abs_path}")
+                self._show_message("路径不存在!")
+                
+        except Exception as e:
+            print(f"打开文件夹错误: {e}")
+            # 只有在真正出错时才显示错误消息
+            if not os.path.exists(abs_path) or not os.path.isdir(abs_path):
+                self._show_message("无法打开文件夹!")
+    def _delete_path(self, name):
+        """删除路径"""
+        try:
+            if name in self.paths_data:
+                # 禁用所有按钮，防止重复点击
+                for widget in self.buttons_frame.winfo_children():
+                    for child in widget.winfo_children():
+                        if isinstance(child, RoundedButton):
+                            child.configure(state='disabled')
+                
+                # 删除路径数据
+                del self.paths_data[name]
+                self._save_paths()
+                
+                # 直接重建按钮
+                self._create_path_buttons()
+                
+                # 更新画布
+                self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+                
+                # 显示成功消息
+                self.root.after(100, lambda: self._show_message("已删除!", important=True))  # 删除操作显示窗口
+                
+        except Exception as e:
+            print(f"Delete path error: {e}")
+            self._show_message("删除失败!", important=True)  # 错误信息显示窗口
+            # 发生错误时重新加载所有按钮
+            try:
+                self._create_path_buttons()
+            except:
+                pass
+    def _load_paths(self):
+        """加载保存的路径"""
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    paths = json.load(f)
+                    return paths if paths else {}
+            return {}
+        except Exception as e:
+            print(f"Error loading paths: {e}")
+            return {}
+            
+    def _save_paths(self):
+        """保存路径配置并创建备份"""
+        try:
+            # 先创建临时文件
+            temp_file = self.config_file + '.tmp'
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(self.paths_data, f, ensure_ascii=False, indent=4)
+            
+            # 如果原配置文件存在，创建备份
+            if os.path.exists(self.config_file):
+                backup_dir = os.path.join(self.config_dir, 'backups')
+                os.makedirs(backup_dir, exist_ok=True)
+                
+                # 创建带时间戳的备份
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_file = os.path.join(
+                    backup_dir, 
+                    f'paths_backup_{timestamp}.json'
+                )
+                
+                # 复制当前配置到备份
+                shutil.copy2(self.config_file, backup_file)
+            
+            # 用临时文件替换原配置文件
+            if os.path.exists(temp_file):
+                shutil.move(temp_file, self.config_file)
+            
+            # 清理旧备份（只保留最近10个）
+            self._clean_old_backups()
+                
+        except Exception as e:
+            logging.error(f"保存配置失败: {e}")
+            self._show_message("配置保存失败！")
+            
+            # 如果存在临时文件，删除它
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except:
+                    pass
+    def _clean_old_backups(self):
+        backups = sorted(glob.glob(os.path.join(self.config_dir, 'backups', 'paths_backup_*.json')))
+        if len(backups) > 10:
+            for old_backup in backups[:-10]:
+                os.remove(old_backup)
+    def _show_message(self, message, important=False):
+        """显示消息提示
+        Args:
+            message: 消息内容
+            important: 是否是重要消息，只有重要消息才会显示窗口
+        """
+        try:
+            # 如果不是重要消息，只打印到控制台
+            if not important:
+                print(f"操作提示: {message}")
+                return
+                
+            if not self.root.winfo_exists():
+                return
+            
+            # 如果已有消息窗口，先清理
+            if self.msg_window and self.msg_window.winfo_exists():
+                self.msg_window.destroy()
+            if self.msg_timer:
+                self.root.after_cancel(self.msg_timer)
+            
+            # 创建新的消息窗口
+            self.msg_window = tk.Toplevel(self.root)
+            self.msg_window.iconbitmap(self.icon_path)
+            self.msg_window.overrideredirect(True)
+            self.msg_window.configure(bg="#1e1e1e")
+            self.msg_window.attributes('-topmost', True, '-alpha', 0.0)
+            
+            # 确保消息窗口在屏幕范围内
+            window_width = 200
+            window_height = 60
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            
+            x = min(
+                self.root.winfo_x() + (self.root.winfo_width() - window_width) // 2,
+                screen_width - window_width
+            )
+            y = min(
+                self.root.winfo_y() + (self.root.winfo_height() - window_height) // 2,
+                screen_height - window_height
+            )
+            
+            x = max(0, x)
+            y = max(0, y)
+            
+            msg_window.geometry(f"{window_width}x{window_height}+{x}+{y}")
+            
+            # 创建带边框的框架
+            frame = tk.Frame(
+                msg_window,
+                bg="#1e1e1e",
+                highlightbackground="#4c5052",
+                highlightthickness=1
+            )
+            frame.pack(fill="both", expand=True, padx=2, pady=2)
+            
+            # 添加消息
+            msg_label = tk.Label(
+                frame,
+                text=message,
+                bg="#1e1e1e",
+                fg="white",
+                font=self.FONT_TITLE
+            )
+            msg_label.pack(pady=15)
+            
+            # 淡入动画计数器
+            fade_in_counter = [0]
+            
+            def fade_in_step():
+                """单步淡入"""
+                if not msg_window.winfo_exists():
+                    return
+                
+                fade_in_counter[0] += 1
+                msg_window.attributes('-alpha', fade_in_counter[0] / 10)
+                
+                if fade_in_counter[0] < 10:
+                    msg_window.after(20, fade_in_step)
+                else:
+                    # 淡入完成后等待一段时间再淡出
+                    msg_window.after(800, start_fade_out)
+            
+            def start_fade_out():
+                """开始淡出动画"""
+                if not msg_window.winfo_exists():
+                    return
+                fade_out_counter = [10]
+                
+                def fade_out_step():
+                    """单步淡出"""
+                    if not msg_window.winfo_exists():
+                        return
+                    
+                    fade_out_counter[0] -= 1
+                    msg_window.attributes('-alpha', fade_out_counter[0] / 10)
+                    
+                    if fade_out_counter[0] > 0:
+                        msg_window.after(20, fade_out_step)
+                    else:
+                        msg_window.destroy()
+                
+                fade_out_step()
+            
+            # 启动淡入动画
+            fade_in_step()
+        except Exception as e:
+            print(f"显示消息失败: {e}")
+    def _browse_path(self, entry):
+        """浏览文件夹"""
+        path = filedialog.askdirectory()
+        if path:
+            entry.delete(0, tk.END)
+            entry.insert(0, path)
+    def _confirm_add(self, path, name):
+        """确认添加路径"""
+        if path and name:
+            self.paths_data[name] = path
+            self._save_paths()
+            self._create_path_buttons()
+            self.add_dialog.destroy()
+            self.add_dialog = None
+            self._show_message("Path added successfully!")
+        
+    def _on_frame_configure(self, event=None):
+        """更新画布的滚动区域"""
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+    def _on_canvas_configure(self, event):
+        """当画布大小改变时，调整内部框架的宽度"""
+        self.canvas.itemconfig(self.canvas_frame, width=event.width)
+    def _on_mousewheel(self, event):
+        """处理鼠标滚轮事件"""
+        if self.canvas.winfo_height() < self.buttons_frame.winfo_height():
+            self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+    def _create_resize_area(self):
+        """创建窗口大小调整区域"""
+        resize_frame = tk.Frame(self.root, bg="#1e1e1e", height=4, cursor="sizing")
+        resize_frame.pack(side="bottom", fill="x")
+        
+        def start_resize(event):
+            self.root.start_y = event.y_root
+            self.root.start_x = event.x_root
+            self.root.start_height = self.root.winfo_height()
+            self.root.start_width = self.root.winfo_width()
+        
+        def do_resize(event):
+            if not hasattr(self.root, 'start_height'):
+                return
+            
+            # 计算高度和宽度的变化
+            height_diff = event.y_root - self.root.start_y
+            width_diff = event.x_root - self.root.start_x
+            
+            # 计算新的高度和宽度
+            new_height = self.root.start_height + height_diff
+            new_width = self.root.start_width + width_diff
+            
+            # 获取最小和最大尺寸
+            min_width = 120  # 与minsize保持一致
+            min_height = 300
+            max_width = 800
+            max_height = self.root.winfo_screenheight() - 100
+            
+            # 应用限制
+            new_width = max(min_width, min(new_width, max_width))
+            new_height = max(min_height, min(new_height, max_height))
+            
+            # 确保窗口不会超出屏幕边界
+            x = max(0, min(self.root.winfo_x(), self.root.winfo_screenwidth() - new_width))
+            y = max(0, min(self.root.winfo_y(), self.root.winfo_screenheight() - new_height))
+            
+            # 更新窗口大小和位置
+            self.root.geometry(f"{int(new_width)}x{int(new_height)}+{x}+{y}")
+            
+            # 强制更新按钮布局
+            self.root.after(10, self._create_path_buttons)
+        
+        def stop_resize(event):
+            if hasattr(self.root, 'start_height'):
+                delattr(self.root, 'start_height')
+                delattr(self.root, 'start_width')
+                delattr(self.root, 'start_x')
+                delattr(self.root, 'start_y')
+        
+        resize_frame.bind("<Button-1>", start_resize)
+        resize_frame.bind("<B1-Motion>", do_resize)
+        resize_frame.bind("<ButtonRelease-1>", stop_resize)
+        
+        # 添加视觉反馈
+        def on_enter(event):
+            resize_frame.configure(bg="#4c5052")
+        
+        def on_leave(event):
+            resize_frame.configure(bg="#1e1e1e")
+        
+        resize_frame.bind("<Enter>", on_enter)
+        resize_frame.bind("<Leave>", on_leave)
+    def _redraw_interface(self):
+        """重绘整个界面"""
+        try:
+            # 更新画布配置
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+            
+            # 重新计算和更新按钮框架的宽度
+            self.canvas.itemconfig(self.canvas_frame, width=self.canvas.winfo_width())
+            
+            # 强制更新所有子组件
+            for widget in self.buttons_frame.winfo_children():
+                widget.update()
+            
+            # 更新主窗口
+            self.root.update_idletasks()
+            self.root.update()
+            
+        except Exception as e:
+            print(f"重绘界面时出错: {e}")
+    def _on_drop(self, event):
+        """处理文件夹、快捷方式和文件的拖放"""
+        try:
+            # 获取路径并处理编码
+            path = event.data
+            if isinstance(path, bytes):
+                path = path.decode('gbk')  # Windows 默认使用 GBK 编码
+            
+            # 移除可能的花括号
+            if path.startswith('{'):
+                path = path[1:]
+            if path.endswith('}'):
+                path = path[:-1]
+            
+            # 处理快捷方式
+            if path.lower().endswith('.lnk'):
+                print(f"Getting info for: {path}")
+                try:
+                    shell = Dispatch("WScript.Shell")
+                    shortcut = shell.CreateShortCut(path)
+                    target_path = shortcut.Targetpath
+                    
+                    # 检查是否是Adobe软件
+                    is_adobe = any(x in target_path.lower() for x in ['adobe', 'after effects', 'photoshop', 'premiere'])
+                    
+                    if is_adobe:
+                        # 对于Adobe软件，直接使用目标路径
+                        program_path = target_path
+                        name = os.path.splitext(os.path.basename(path))[0]
+                        # 移除常见的前缀和后缀
+                        name = name.replace("Adobe ", "").replace(" 2020", "").replace(" 2021", "").replace(" 2022", "").replace(" 2023", "").replace(" 2024", "")
+                    else:
+                        # 其他软件使用原始快捷方式路径
+                        program_path = path
+                        name = os.path.splitext(os.path.basename(path))[0]
+                    
+                    # 确保名称唯一
+                    base_name = name
+                    counter = 1
+                    while name in self.paths_data:
+                        name = f"{base_name}_{counter}"
+                        counter += 1
+                    
+                    # 创建程序信息
+                    program_info = {
+                        'path': program_path,
+                        'working_dir': os.path.dirname(program_path)
+                    }
+                    
+                    print(f"检测到快捷方式: 💻 {name} -> {program_path}")
+                    
+                    # 添加到路径数据
+                    self.paths_data[name] = f"program:{json.dumps(program_info, ensure_ascii=False)}"
+                    self._save_paths()
+                    self._create_path_buttons()
+                    self._show_message("程序已添加!")
+                    return
+                    
+                except Exception as e:
+                    print(f"处理快捷方式时出错: {e}")
+                    
+            # Windows 系统下的路径处理
+            if os.name == 'nt':
+                # 统一路径分隔符并获取绝对路径
+                path = os.path.abspath(path.replace('\\', '/'))
+            
+            print(f"原始路径: {path}")
+            
+            try:
+                # 尝试直接使用路径
+                if os.path.exists(path):
+                    print(f"路径直接存在")
+                else:
+                    # 如果路径不存在，尝试不同的编码方式
+                    try:
+                        encoded_path = path.encode('utf-8').decode('utf-8')
+                        if os.path.exists(encoded_path):
+                            path = encoded_path
+                            print(f"使用UTF-8编码路径")
+                    except:
+                        try:
+                            encoded_path = path.encode('gbk').decode('gbk')
+                            if os.path.exists(encoded_path):
+                                path = encoded_path
+                                print(f"使用GBK编码路径")
+                        except:
+                            pass
+            except Exception as e:
+                print(f"路径编码处理错误: {e}")
+            
+            print(f"最终路径: {path}")
+            print(f"路径是否存在: {os.path.exists(path)}")
+            print(f"是否是文件夹: {os.path.isdir(path)}")
+            
+            # 检查是否是文件夹
+            if os.path.isdir(path):
+                print(f"检测到文件夹: {path}")
+                try:
+                    name = os.path.basename(path)
+                    base_name = name
+                    counter = 1
+                    while name in self.paths_data:
+                        name = f"{base_name}_{counter}"
+                        counter += 1
+                    
+                    # 存储完整的绝对路径
+                    full_path = os.path.abspath(path)
+                    self.paths_data[name] = full_path.replace('\\', '/')
+                    print(f"存储的文件夹路径: {self.paths_data[name]}")
+                    
+                    self._save_paths()
+                    self._create_path_buttons()
+                    self._show_message("文件夹已添加!")
+                    return
+                except Exception as e:
+                    print(f"处理文件夹时出错: {e}")
+                    self._show_message("添加文件夹失败!")
+                    return
+
+            # 检查是否是文件
+            if os.path.isfile(path):
+                file_ext = os.path.splitext(path)[1].lower()
+                print(f"检测到文件，扩展名: {file_ext}")
+                
+                # 确定文件类型
+                file_type = None
+                for type_name, extensions in self.SUPPORTED_FORMATS.items():
+                    if file_ext in extensions:
+                        file_type = type_name
+                        break
+                
+                if file_type:
+                    try:
+                        name = os.path.basename(path)
+                        base_name = name
+                        counter = 1
+                        while name in self.paths_data:
+                            name = f"{base_name}_{counter}"
+                            counter += 1
+                        
+                        # 使用对应的图标
+                        icon = self.FILE_TYPE_ICONS.get(file_type, "📄")
+                        
+                        # 对工程文件进行特殊处理
+                        if file_type == "工程文件":
+                            if file_ext == '.aep' or file_ext == '.aepx':
+                                display_name = f"AE: {name}"
+                            elif file_ext == '.uproject':
+                                display_name = f"UE: {name}"
+                            else:
+                                display_name = name
+                        else:
+                            display_name = name
+                        
+                        # 存储文件信息
+                        file_info = {
+                            'path': path,
+                            'type': file_type
+                        }
+                        
+                        self.paths_data[display_name] = f"file:{json.dumps(file_info, ensure_ascii=False)}"
+                        self._save_paths()
+                        self._create_path_buttons()
+                        self._show_message(f"{file_type}已添加!")
+                        return
+                    except Exception as e:
+                        print(f"处理{file_type}文件时出错: {e}")
+                        self._show_message(f"添加{file_type}失败!")
+                        return
+
+            # 如果都不匹配，显示错误信息
+            print(f"不支持的文件类型: {path}")
+            self._show_message("不支持的文件类型!")
+            
+            # 在成功添加后，确保更新界面
+            is_first_button = len(self.paths_data) <= 2  # 修改这里，处理前两个按钮
+            
+            if is_first_button:
+                # 强制完整的布局更新
+                self.root.update_idletasks()
+                self.buttons_frame.update_idletasks()
+                self.main_frame.update_idletasks()
+                
+                # 强制设置窗口尺寸
+                self.root.geometry(f"500x{self.root.winfo_height()}")
+                
+                # 强制更新所有框架
+                self.main_frame.update()
+                self.buttons_frame.update()
+                
+                # 延迟创建按钮，确保窗口尺寸已更新
+                def delayed_update():
+                    self._create_path_buttons()
+                    self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+                    self.canvas.yview_moveto(0)
+                    # 再次强制更新布局
+                    self.root.update_idletasks()
+                
+                # 使用更长的延迟确保布局已完全准备好
+                self.root.after(100, delayed_update)
+            else:
+                self._create_path_buttons()
+                self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+                self.canvas.yview_moveto(0)
+                
+        except Exception as e:
+            print(f"拖放处理时出错: {e}")
+            self._show_message(f"添加失败: {str(e)}")
+    def _get_shortcut_info(self, shortcut_path):
+        """获取快捷方式信息（带缓存）"""
+        if shortcut_path in self._path_info_cache:
+            return self._path_info_cache[shortcut_path]
+            
+        info = self._fetch_shortcut_info(shortcut_path)
+        self._path_info_cache[shortcut_path] = info
+        return info
+    def _fetch_shortcut_info(self, shortcut_path):
+        """获取快捷方式信息"""
+        try:
+            print(f"Getting info for: {shortcut_path}")
+            
+            # 获取不带扩展名的文件名作为显示名称
+            name = os.path.splitext(os.path.basename(shortcut_path))[0]
+            
+            # 软件特征识别配置
+            software_patterns = {
+                "adobe": {
+                    "name": "Adobe",
+                    "patterns": ["photoshop", "illustrator", "premiere", "after effects"],
+                    "apps": {
+                        "photoshop": ("Photoshop", "🎨"),
+                        "illustrator": ("Illustrator", "🎨"),
+                        "premiere": ("Premiere Pro", "🎬"),
+                        "after effects": ("After Effects", "🎬"),
+                        "lightroom": ("Lightroom", "🎨"),
+                        "indesign": ("InDesign", "🎨"),
+                        "acrobat": ("Acrobat", "📄")
+                    }
+                },
+                "office": {
+                    "name": "Office",
+                    "patterns": ["word", "excel", "powerpoint", "outlook"],
+                    "apps": {
+                        "word": ("Word", "📄"),
+                        "excel": ("Excel", "📊"),
+                        "powerpoint": ("PowerPoint", "📊"),
+                        "outlook": ("Outlook", "📧")
+                    }
+                },
+                "browser": {
+                    "name": "浏览器",
+                    "patterns": ["chrome", "firefox", "edge", "opera"],
+                    "apps": {
+                        "chrome": "Chrome",
+                        "firefox": "Firefox",
+                        "edge": "Edge",
+                        "opera": "Opera"
+                    },
+                    "icon": "🌐"
+                }
+            }
+            
+            # 处理快捷方式信息
+            shell = Dispatch("WScript.Shell")
+            shortcut = shell.CreateShortCut(shortcut_path)
+            target_path = shortcut.Targetpath
+            arguments = shortcut.Arguments
+            working_dir = shortcut.WorkingDirectory or os.path.dirname(shortcut_path)
+            
+            # 检查是否匹配任何软件模式
+            name_lower = name.lower()
+            for software, config in software_patterns.items():
+                # 对于 Adobe 和 Office 应用程序的特殊处理
+                if software in ["adobe", "office"]:
+                    for app_key, (app_name, icon) in config["apps"].items():
+                        if app_key in name_lower:
+                            display_name = f"{icon} {app_name}"
+                            return display_name, target_path, arguments, working_dir
+            
+            # 如果没有匹配的特殊软件，返回原始名称和路径信息
+            return name, target_path, arguments, working_dir
+            
+        except Exception as e:
+            print(f"Error in get_shortcut_info: {e}")
+            return name, shortcut_path, "", os.path.dirname(shortcut_path)
+    def _clean_name(self, original_name):
+        """清理名称"""
+        try:
+            # 常见的需要清理的后缀和前缀
+            clean_terms = [
+                "- shortcut", "shortcut", ".exe", ".lnk",
+                "launcher", "start", "run",
+                # 游戏平台
+                "steam", "epic", "ubisoft", "ea", "origin", 
+                "battle.net", "battlenet", "riot", "rockstar",
+                # 版本标识
+                "x64", "x86", "(x64)", "(x86)", "64-bit", "32-bit",
+                # 其他常见后缀
+                "setup", "install", "uninstall",
+                # 特殊字符
+                "™", "®", "©"
+            ]
+            
+            display_name = original_name
+            
+            # 移除括号及其内容
+            display_name = re.sub(r'\([^)]*\)', '', display_name)
+            display_name = re.sub(r'\[[^\]]*\]', '', display_name)
+            
+            # 清理指定的术语
+            for term in clean_terms:
+                if display_name.lower().endswith(term.lower()):
+                    display_name = display_name[:-len(term)].strip()
+                if display_name.lower().startswith(term.lower()):
+                    display_name = display_name[len(term):].strip()
+            
+            # 清理多余的空格、破折号和下划线
+            display_name = display_name.strip(" -_")
+            # 将多个空格替换为单个空格
+            display_name = ' '.join(display_name.split())
+            
+            # 特殊处理 UE/虚幻引擎
+            if "unreal" in display_name.lower() or "ue" in display_name.lower():
+                version_match = re.search(r'(\d+\.?\d*)', display_name)
+                if version_match:
+                    display_name = f"虚幻引擎 {version_match.group(1)}"
+                else:
+                    display_name = "虚幻引擎"
+            
+            # 如果清理后为空，返回原始名称
+            return display_name if display_name else original_name
+            
+        except Exception as e:
+            print(f"Error in _clean_name: {e}")  # 调试信息
+            return original_name
+    def _open_program(self, program_path, arguments=None, working_dir=None):
+        """打开程序"""
+        try:
+            # 检查路径是否存在
+            if not os.path.exists(program_path):
+                self._show_message("程序路径不存在!")
+                return
+
+            # 如果是快捷方式(.lnk文件)
+            if program_path.lower().endswith('.lnk'):
+                try:
+                    shell = Dispatch("WScript.Shell")
+                    shortcut = shell.CreateShortCut(program_path)
+                    program_path = shortcut.Targetpath
+                    if not arguments:
+                        arguments = shortcut.Arguments
+                    if not working_dir:
+                        working_dir = shortcut.WorkingDirectory
+                except Exception as e:
+                    print(f"解析快捷方式失败: {e}")
+                    self._show_message("无法解析快捷方式!")
+                    return
+
+            # 准备启动参数
+            startup_info = subprocess.STARTUPINFO()
+            startup_info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            
+            # 构建命令
+            cmd = [program_path]
+            if arguments:
+                cmd.extend(arguments.split())
+
+            # 启动程序
+            subprocess.Popen(
+                cmd,
+                cwd=working_dir if working_dir else os.path.dirname(program_path),
+                startupinfo=startup_info,
+                shell=True  # 添加shell=True以更好地处理路径中的空格
+            )
+
+        except Exception as e:
+            print(f"启动程序失败: {e}")
+            self._show_message("无法启动程序!")
+    def _on_button_click(self, path):
+        """处理按钮点击事件"""
+        try:
+            # 如果启用了复制路径功能
+            if self.copy_path_enabled.get():
+                actual_path = ""
+                
+                # 解析不同类型的路径
+                if isinstance(path, str):
+                    if path.startswith('program:'):
+                        data = json.loads(path.split(':', 1)[1])
+                        actual_path = data['path']
+                    elif path.startswith('file:'):
+                        data = json.loads(path.split(':', 1)[1])
+                        actual_path = data['path']
+                    elif path.startswith('web:'):
+                        data = json.loads(path.split(':', 1)[1])
+                        actual_path = data['url']
+                    elif path.startswith('folder:'):
+                        data = json.loads(path.split(':', 1)[1])
+                        actual_path = data['path']
+                    else:
+                        actual_path = path
+                
+                # 复制路径到剪贴板
+                self.root.clipboard_clear()
+                self.root.clipboard_append(actual_path)
+                self._show_message("路径已复制!")
+                return
+            
+            # 处理不同类型的路径打开
+            if isinstance(path, str):
+                if path.startswith('program:'):
+                    data = json.loads(path.split(':', 1)[1])
+                    self._open_program(data['path'], data.get('arguments'), data.get('working_dir'))
+                elif path.startswith('file:'):
+                    data = json.loads(path.split(':', 1)[1])
+                    self._open_file(data['path'])
+                elif path.startswith('web:'):
+                    data = json.loads(path.split(':', 1)[1])
+                    webbrowser.open(data['url'])
+                elif path.startswith('folder:'):
+                    data = json.loads(path.split(':', 1)[1])
+                    self._open_path(data['path'])
+                else:
+                    # 直接的文件夹路径
+                    self._open_path(path)
+                
+        except Exception as e:
+            print(f"按钮点击处理错误: {e}")
+            self._show_message("打开失败!")
+    def _is_game_directory(self, path):
+        """检查是否是游戏目录"""
+        if not os.path.isdir(path):
+            return False
+            
+        # 游戏目录特征
+        game_indicators = [
+            '.exe',  # 可执行文件
+            'steam_api.dll',  # Steam游戏特征
+            'UE4Game',  # 虚幻引擎游戏特征
+            'UnityPlayer.dll',  # Unity游戏特征
+            'GameData',  # 通用游戏数据目录
+            'Binaries',  # 游戏二进制文件目录
+            'SaveGames'  # 游戏存档目录
+        ]
+        
+        # 检查目录内容
+        dir_contents = os.listdir(path)
+        exe_files = [f for f in dir_contents if f.lower().endswith('.exe')]
+        
+        # 检查是否存在游戏特征
+        has_indicators = any(indicator.lower() in str(dir_contents).lower() 
+                           for indicator in game_indicators)
+        
+        return bool(exe_files) and has_indicators
+
+    def _check_special_software(self, path):
+        """检查是否是特殊软件"""
+        path_lower = path.lower()
+        
+        # 检查是否匹配特殊软件路径
+        for software, config in self.SPECIAL_SOFTWARE_PATHS.items():
+            for possible_path in config["possible_paths"]:
+                if os.path.exists(possible_path) and (
+                    path_lower in possible_path.lower() or 
+                    possible_path.lower() in path_lower
+                ):
+                    return {
+                        "name": config["name"],
+                        "path": possible_path,
+                        "icon": config["icon"]
+                    }
+        return None
+
+    def _add_special_software_shortcut(self, software):
+        """添加特殊软件快捷方式"""
+        display_name = f"{software['icon']} {software['name']}"
+        
+        # 如果名称已存在，添加数字后缀
+        base_name = display_name
+        counter = 1
+        while display_name in self.paths_data:
+            display_name = f"{base_name}_{counter}"
+            counter += 1
+        
+        # 存储程序信息
+        program_info = {
+            'path': software['path'],
+            'arguments': '',
+            'working_dir': os.path.dirname(software['path'])
+        }
+        
+        self.paths_data[display_name] = f"program:{json.dumps(program_info)}"
+        self._save_paths()
+        self._create_path_buttons()
+        self._show_message(f"{software['name']}已添加!")
+
+    def _add_game_shortcut(self, path):
+        """添加游戏快捷方式"""
+        # 查找主程序
+        exe_files = []
+        for root, dirs, files in os.walk(path):
+            for file in files:
+                if file.lower().endswith('.exe'):
+                    exe_files.append(os.path.join(root, file))
+        
+        if not exe_files:
+            self._show_message("未找到游戏主程序!")
+            return
+            
+        # 尝试找到主程序（通常是较大的exe文件）
+        main_exe = max(exe_files, key=lambda f: os.path.getsize(f))
+        
+        # 获取游戏名称
+        game_name = os.path.basename(path)
+        display_name = f"🎮 {game_name}"
+        
+        # 如果名称已存在，添加数字后缀
+        base_name = display_name
+        counter = 1
+        while display_name in self.paths_data:
+            display_name = f"{base_name}_{counter}"
+            counter += 1
+        
+        # 存储程序信息
+        program_info = {
+            'path': main_exe,
+            'arguments': '',
+            'working_dir': path
+        }
+        
+        self.paths_data[display_name] = f"program:{json.dumps(program_info)}"
+        self._save_paths()
+        self._create_path_buttons()
+        self._show_message("游戏已添加!")
+    def _show_image_preview(self, image_path):
+        """显示图片预览窗口"""
+        try:
+            # 如果已经有预览窗口，先关闭它
+            if self.preview_window and self.preview_window.winfo_exists():
+                self.preview_window.destroy()
+            
+            # 创建预览窗口
+            self.preview_window = tk.Toplevel(self.root)
+            self.preview_window.title("图片预览")
+            self.preview_window.configure(bg="#2b2b2b")
+            self.preview_window.iconbitmap(self.icon_path)  # 设置预览窗口图标
+            
+            # 设置窗口大小和位置
+            preview_width = self.IMAGE_PREVIEW_SIZE[0] + 40
+            preview_height = self.IMAGE_PREVIEW_SIZE[1] + 60
+            x = self.root.winfo_x() + (self.root.winfo_width() - preview_width) // 2
+            y = self.root.winfo_y() + (self.root.winfo_height() - preview_height) // 2
+            self.preview_window.geometry(f"{preview_width}x{preview_height}+{x}+{y}")
+            
+            # 加载并调整图片大小
+            image = Image.open(image_path)
+            image.thumbnail(self.IMAGE_PREVIEW_SIZE)
+            photo = ImageTk.PhotoImage(image)
+            
+            # 创建图片标签
+            image_label = tk.Label(
+                self.preview_window,
+                image=photo,
+                bg="#2b2b2b",
+                bd=2,
+                relief="solid"
+            )
+            image_label.image = photo  # 保持引用
+            image_label.pack(pady=10)
+            
+            # 添加文件名标签
+            name_label = tk.Label(
+                self.preview_window,
+                text=os.path.basename(image_path),
+                bg="#2b2b2b",
+                fg="white",
+                font=self.FONT_NORMAL
+            )
+            name_label.pack(pady=5)
+            
+            # 添加关闭按钮
+            close_btn = tk.Button(
+                self.preview_window,
+                text="关闭",
+                command=self.preview_window.destroy,
+                bg="#4c5052",
+                fg="white",
+                activebackground="#5c6062",
+                activeforeground="white",
+                relief="flat",
+                cursor="hand2",
+                font=self.FONT_NORMAL
+            )
+            close_btn.pack(pady=5)
+            
+        except Exception as e:
+            print(f"Error showing image preview: {e}")
+            self._show_message("无法预览图片!")
+    def _create_hot_corner_detector(self):
+        """创建热区检测器窗口"""
+        self.detector = tk.Toplevel(self.root)
+        self.detector.withdraw()  # 初始时隐藏
+        self.detector.overrideredirect(True)
+        self.detector.attributes('-alpha', 0.01)  # 几乎完全透明
+        self.detector.attributes('-topmost', True)  # 热区始终置顶
+        
+        # 设置热区位置和大小
+        self.detector.geometry(f"{self.hot_corner_size}x{self.hot_corner_size}+0+0")
+        
+        # 改为绑定鼠标点击事件
+        self.detector.bind("<Button-1>", self._on_hot_corner_activated)
+        
+        # 确保热区始终可用
+        self._ensure_hot_corner_visible()
+
+    def _ensure_hot_corner_visible(self):
+        """确保热区始终可见和置顶"""
+        if hasattr(self, 'detector'):
+            self.detector.lift()  # 将热区窗口提升到最顶层
+            self.detector.attributes('-topmost', True)  # 确保热区始终置顶
+        # 每500毫秒检查一次
+        self.root.after(500, self._ensure_hot_corner_visible)
+
+    def _on_minimize(self, event):
+        """窗口最小化时激活热区"""
+        self.hot_corner_active = True
+        self.detector.deiconify()  # 显示热区检测器
+        self.detector.lift()  # 确保热区在最顶层
+        self.detector.attributes('-topmost', True)  # 确保热区置顶
+
+    def _on_restore(self, event):
+        """窗口恢复时禁用热区"""
+        self.hot_corner_active = False
+        self.detector.withdraw()  # 隐藏热区检测器
+        
+    def _on_hot_corner_activated(self, event):
+        """当点击热区时"""
+        if self.hot_corner_active:
+            # 恢复窗口
+            self.root.deiconify()
+            self.root.lift()  # 将窗口置于顶层
+            
+            # 如果开启了置顶，确保窗口保持置顶
+            if self.is_topmost.get():
+                self.root.attributes('-topmost', True)
+            
+            self.root.focus_force()  # 强制获取焦点
+            
+            # 移动到原来的位置
+            x = 20  # 距离左边缘20像素
+            y = 20  # 距离上边缘20像素
+            self.root.geometry(f"+{x}+{y}")
+            
+            # 禁用热区
+            self.hot_corner_active = False
+            self.detector.withdraw()
+    def _create_tooltip(self, widget, text):
+        """创建工具提示"""
+        def enter(event):
+            # 使用内部按钮组件来存储tooltip
+            button = widget.button if hasattr(widget, 'button') else widget
+            
+            # 确保之前的tooltip被清理
+            if hasattr(button, 'tooltip') and button.tooltip.winfo_exists():
+                button.tooltip.destroy()
+            
+            try:
+                tooltip = tk.Toplevel()
+                button.tooltip = tooltip  # 将tooltip绑定到内部按钮
+                tooltip.withdraw()
+                tooltip.wm_overrideredirect(True)
+                
+                # 创建圆角框架
+                frame = tk.Frame(
+                    tooltip,
+                    bg="#1e1e1e",
+                    bd=1,
+                    relief="solid",
+                    highlightbackground="#4c5052",
+                    highlightthickness=1
+                )
+                frame.pack(padx=2, pady=2)
+                
+                # 添加图标
+                icon_label = tk.Label(
+                    frame,
+                    text="ℹ️",
+                    bg="#1e1e1e",
+                    fg="white",
+                    font=self.FONT_NORMAL
+                )
+                icon_label.pack(side="left", padx=(5,2))
+                
+                # 文本标签
+                label = tk.Label(
+                    frame,
+                    text=text,
+                    justify=tk.LEFT,
+                    bg="#1e1e1e",
+                    fg="white",
+                    font=self.FONT_NORMAL
+                )
+                label.pack(side="left", padx=(2,5), pady=2)
+                
+                # 淡入效果
+                tooltip.update_idletasks()
+                tooltip.deiconify()
+                tooltip.attributes('-alpha', 0.0)
+                
+                x = widget.winfo_rootx()
+                y = widget.winfo_rooty() + widget.winfo_height() + 5
+                tooltip.geometry(f"+{x}+{y}")
+                
+                for i in range(10):
+                    if not tooltip.winfo_exists():
+                        break
+                    tooltip.attributes('-alpha', i/10)
+                    tooltip.update()
+                    time.sleep(0.01)
+            except Exception as e:
+                print(f"Tooltip creation error: {e}")
+        
+        def leave(event):
+            try:
+                button = widget.button if hasattr(widget, 'button') else widget
+                if hasattr(button, "tooltip") and button.tooltip.winfo_exists():
+                    button.tooltip.destroy()
+            except Exception as e:
+                print(f"Tooltip destruction error: {e}")
+        
+        # 绑定事件到内部按钮
+        if hasattr(widget, 'button'):
+            widget.button.bind('<Enter>', enter)
+            widget.button.bind('<Leave>', leave)
+        else:
+            widget.bind('<Enter>', enter)
+            widget.bind('<Leave>', leave)
+    def _setup_hotkeys(self):
+        """设置快捷键"""
+        self.root.bind('<Control-q>', lambda e: self.root.quit())
+        self.root.bind('<Escape>', lambda e: self.root.iconify())
+    def _check_backup_status(self):
+        """检查备份状态"""
+        last_backup = self._get_last_backup_time()
+        if (datetime.now() - last_backup).days >= 7:
+            self._show_backup_reminder()
+    def _on_window_configure(self, event):
+        """处理窗口配置变化事件"""
+        if event.widget == self.root:
+            # 获取当前窗口大小
+            current_size = (self.root.winfo_width(), self.root.winfo_height())
+            
+            # 如果大小发生变化
+            if not hasattr(self, '_last_window_size') or current_size != self._last_window_size:
+                # 取消之前的计时器（如果存在）
+                if hasattr(self, '_resize_timer'):
+                    self.root.after_cancel(self._resize_timer)
+                
+                # 设置新的计时器
+                self._resize_timer = self.root.after(50, self._create_path_buttons)  # 减少延迟时间
+                self._last_window_size = current_size
+
+    def _update_buttons_layout(self):
+        """更新按钮布局"""
+        try:
+            # 获取当前布局状态
+            current_width = self.root.winfo_width()
+            min_button_width = 220
+            current_buttons_per_row = min(2, max(1, (current_width - 80) // min_button_width))
+            
+            # 计算当前的按钮布局
+            if not hasattr(self, '_current_buttons_per_row'):
+                self._current_buttons_per_row = current_buttons_per_row
+            
+            # 只有当布局真正需要改变时才重建按钮
+            if current_buttons_per_row != self._current_buttons_per_row:
+                self._create_path_buttons()
+                self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+                self._current_buttons_per_row = current_buttons_per_row
+                
+        except Exception as e:
+            print(f"Update buttons layout error: {e}")
+    def _toggle_topmost(self):
+        """切换窗口置顶状态"""
+        is_top = self.is_topmost.get()
+        self.root.attributes('-topmost', is_top)
+        self._show_message("置顶已" + ("开启" if is_top else "关闭"))
+    def _toggle_note(self):
+        """切换临时笔记显示状态"""
+        is_enabled = self.note_enabled.get()
+        
+        if is_enabled:
+            # 设置笔记区域的高度并显示
+            self.note_container.configure(height=90)
+            self.note_container.pack(side="top", fill="x", pady=(5, 0))
+            
+            # 如果是默认文本，清空并设置为编辑状态
+            if self.temp_input.get("1.0", "end-1c").strip() == "临时笔记...":
+                self.temp_input.delete("1.0", tk.END)
+                self.temp_input.config(fg='white')
+            
+            self.temp_input.focus_set()
+        else:
+            # 保存或删除笔记内容
+            current_text = self.temp_input.get("1.0", "end-1c").strip()
+            if current_text and current_text != "临时笔记...":
+                self._save_notes()
+            else:
+                # 如果内容为空，删除笔记文件
+                if os.path.exists(self.notes_file):
+                    os.remove(self.notes_file)
+            
+            # 隐藏笔记区域
+            self.note_container.pack_forget()
+    def run(self):
+        """运行程序"""
+        self.root.mainloop()
+
+    def _is_valid_url(self, url):
+        """检查是否是有效的URL"""
+        try:
+            # 清理URL
+            url = url.strip().lower()
+            
+            # 如果URL以www.开头，添加https://
+            if url.startswith('www.'):
+                url = 'https://' + url
+                
+            # 基本URL格式验证
+            if not any(url.startswith(prefix) for prefix in ('http://', 'https://')):
+                return False
+                
+            # 使用urlparse进行更严格的验证
+            parsed = urlparse(url)
+            
+            # 检查必要的URL组件
+            if not all([parsed.scheme, parsed.netloc]):
+                return False
+                
+            # 检查域名格式
+            if not parsed.netloc or '.' not in parsed.netloc:
+                return False
+                
+            # 检查域名长度
+            if len(parsed.netloc) < 4:  # 最短的有效域名至少需要4个字符 (如 a.io)
+                return False
+                
+            return True
+        
+        except Exception as e:
+            print(f"URL验证错误: {e}")
+            return False
+
+    def _open_url(self, url):
+        """使用默认浏览器打开URL"""
+        try:
+            # 清理URL
+            url = url.strip()
+            # 如果URL以www.开头，添加https://
+            if url.startswith('www.'):
+                url = 'https://' + url
+                
+            # 使用webbrowser模块打开URL
+            webbrowser.open(url, new=2)  # new=2表示在新标签页打开
+            return True
+        except Exception as e:
+            print(f"打开URL错误: {e}")
+            self._show_message("无法打开网页!")
+            return False
+
+    def _add_web_shortcut(self, url):
+        """添加网页快捷方式"""
+        try:
+            # 清理URL
+            url = url.strip()
+            if url.startswith('www.'):
+                url = 'https://' + url
+                
+            # 从URL中提取名称
+            parsed_url = urlparse(url)
+            name = parsed_url.netloc
+            
+            # 移除www.前缀
+            if name.startswith('www.'):
+                name = name[4:]
+                
+            # 提取域名主要部分（例如从 google.com 中提取 google）
+            name = name.split('.')[0]
+            
+            print(f"处理URL: {url}")
+            print(f"提取的名称: {name}")
+            
+            # 清理名称中的特殊字符
+            name = ''.join(c for c in name if c.isalnum() or c in '-._')
+            
+            # 确保名称唯一
+            base_name = name
+            counter = 1
+            while name in self.paths_data:
+                name = f"{base_name}_{counter}"
+                counter += 1
+            
+            # 创建网页信息
+            web_info = {
+                'url': url,
+                'type': 'web',
+                'colors': self.BUTTON_STYLES["web"]  # 使用默认的网页按钮样式
+            }
+            
+            # 添加到路径数据
+            self.paths_data[name] = f"web:{json.dumps(web_info, ensure_ascii=False)}"
+            
+            # 保存并更新界面
+            self._save_paths()
+            self._create_path_buttons()
+            
+            # 显示成功消息
+            self._show_message("网页已添加!", important=True)
+            return True
+        
+        except Exception as e:
+            print(f"添加网页快捷方式时出错: {e}")
+            self._show_message("添加网页失败!", important=True)
+            return False
+
+    def _handle_paste(self, event):
+        """处理粘贴事件"""
+        try:
+            # 获取当前焦点所在的控件
+            focused_widget = self.root.focus_get()
+            
+            # 如果焦点在笔记输入框中且笔记功能已启用，不处理URL添加
+            if focused_widget == self.temp_input and self.note_enabled.get():
+                return None  # 让系统处理默认的粘贴行为
+            
+            # 获取剪贴板内容并清理
+            try:
+                clipboard_text = self.root.clipboard_get().strip()
+                # 移除可能的引号
+                clipboard_text = clipboard_text.strip('"\'')
+                print(f"处理剪贴板内容: {clipboard_text}")
+            except:
+                print("获取剪贴板内容失败")
+                return None
+                
+            # 如果内容为空，直接返回
+            if not clipboard_text:
+                return None
+                
+            # 检查是否是URL
+            if self._is_valid_url(clipboard_text):
+                print(f"检测到有效URL: {clipboard_text}")
+                if self._add_web_shortcut(clipboard_text):
+                    print("URL添加成功")
+                    return 'break'  # 阻止事件继续传播
+                
+            return None
+                
+        except Exception as e:
+            print(f"处理粘贴事件时出错: {e}")
+            return None
+
+    def _load_notes(self):
+        """加载保存的笔记"""
+        try:
+            if os.path.exists(self.notes_file):
+                with open(self.notes_file, 'r', encoding='utf-8') as f:
+                    saved_text = f.read()
+                    if saved_text and saved_text != "临时笔记...":
+                        self.temp_input.delete("1.0", tk.END)
+                        self.temp_input.insert("1.0", saved_text)
+                        self.temp_input.config(fg='white')
+        except Exception as e:
+            print(f"加载笔记失败: {e}")
+
+    def _save_notes(self):
+        """保存笔记内容"""
+        try:
+            text = self.temp_input.get("1.0", "end-1c").strip()
+            if text and text != "临时笔记...":
+                # 如果有内容，保存到文件
+                with open(self.notes_file, 'w', encoding='utf-8') as f:
+                    f.write(text)
+            else:
+                # 如果笔记内容为空，删除笔记文件
+                if os.path.exists(self.notes_file):
+                    os.remove(self.notes_file)
+                
+        except Exception as e:
+            print(f"保存笔记失败: {e}")
+            self._show_message("笔记保存失败!")
+
+    def _show_rename_dialog(self, old_name):
+        """显示重命名对话框"""
+        try:
+            # 创建对话框窗口
+            dialog = tk.Toplevel(self.root)
+            dialog.title("重命名")
+            dialog.configure(bg="#2b2b2b")
+            dialog.transient(self.root)
+            
+            # 只在图标存在时设置图标
+            if self.icon_path and os.path.exists(self.icon_path):
+                try:
+                    dialog.iconbitmap(self.icon_path)
+                except:
+                    pass
+            
+            # 设置窗口大小和位置
+            window_width = 300
+            window_height = 120
+            x = self.root.winfo_x() + (self.root.winfo_width() - window_width) // 2
+            y = self.root.winfo_y() + (self.root.winfo_height() - window_height) // 2
+            dialog.geometry(f"{window_width}x{window_height}+{x}+{y}")
+            
+            # 创建输入框架
+            frame = tk.Frame(dialog, bg="#2b2b2b", padx=20, pady=10)
+            frame.pack(fill="both", expand=True)
+            
+            # 添加标签
+            label = tk.Label(
+                frame,
+                text="新名称:",
+                bg="#2b2b2b",
+                fg="white",
+                font=self.FONT_NORMAL
+            )
+            label.pack(anchor="w", pady=(0, 5))
+            
+            # 添加输入框
+            entry = tk.Entry(
+                frame,
+                bg="#1e1e1e",
+                fg="white",
+                insertbackground="white",
+                relief="flat",
+                font=self.FONT_NORMAL
+            )
+            entry.pack(fill="x", pady=(0, 10))
+            entry.insert(0, old_name)
+            entry.select_range(0, tk.END)
+            entry.focus_set()
+            
+            # 创建按钮框架
+            btn_frame = tk.Frame(frame, bg="#2b2b2b")
+            btn_frame.pack(fill="x")
+            
+            # 确认按钮
+            def confirm_rename():
+                new_name = entry.get().strip()
+                if new_name and new_name != old_name:
+                    self._rename_shortcut(old_name, new_name)
+                dialog.destroy()
+            
+            confirm_btn = tk.Button(
+                btn_frame,
+                text="确认",
+                command=confirm_rename,
+                bg="#4c5052",
+                fg="white",
+                activebackground="#5c6062",
+                activeforeground="white",
+                relief="flat",
+                cursor="hand2",
+                font=self.FONT_NORMAL
+            )
+            confirm_btn.pack(side="left", padx=5)
+            
+            # 取消按钮
+            cancel_btn = tk.Button(
+                btn_frame,
+                text="取消",
+                command=dialog.destroy,
+                bg="#4c5052",
+                fg="white",
+                activebackground="#5c6062",
+                activeforeground="white",
+                relief="flat",
+                cursor="hand2",
+                font=self.FONT_NORMAL
+            )
+            cancel_btn.pack(side="left", padx=5)
+            
+            # 绑定回车键
+            entry.bind('<Return>', lambda e: confirm_rename())
+            entry.bind('<Escape>', lambda e: dialog.destroy())
+            
+            # 设置模态对话框
+            dialog.grab_set()
+            dialog.focus_set()
+            
+        except Exception as e:
+            print(f"显示重命名对话框失败: {e}")
+            self._show_message("无法打开重命名对话框!")
+
+    def _rename_shortcut(self, old_name, new_name):
+        """重命名快捷方式"""
+        try:
+            if new_name in self.paths_data:
+                self._show_message("名称已存在!", important=True)
+                return
+                
+            # 获取所有项目的顺序
+            items = list(self.paths_data.items())
+            
+            # 找到要重命名项目的索引
+            old_index = next(i for i, (name, _) in enumerate(items) if name == old_name)
+            
+            # 获取原始数据
+            path_data = self.paths_data[old_name]
+            
+            # 创建新的有序字典，保持原有顺序
+            new_paths_data = {}
+            
+            # 重建字典，保持顺序
+            for i, (name, data) in enumerate(items):
+                if i == old_index:
+                    # 在原位置插入新名称
+                    new_paths_data[new_name] = path_data
+                else:
+                    new_paths_data[name] = data
+                    
+            # 更新数据
+            self.paths_data = new_paths_data
+            
+            # 保存更改
+            self._save_paths()
+            
+            # 重新创建按钮
+            self._create_path_buttons()
+            
+            # 显示成功消息
+            self._show_message("重命名成功!", important=True)
+            
+        except Exception as e:
+            print(f"重命名失败: {e}")
+            self._show_message("重命名失败!", important=True)
+
+    def _show_sort_dialog(self):
+        """显示排序选项对话框"""
+        try:
+            dialog = tk.Toplevel(self.root)
+            dialog.title("排序选项")
+            dialog.configure(bg="#2b2b2b")
+            dialog.transient(self.root)
+            dialog.iconbitmap(self.icon_path)  # 设置排序对话框图标
+            
+            # 设置窗口大小和位置
+            window_width = 200
+            window_height = 180
+            x = self.root.winfo_x() + (self.root.winfo_width() - window_width) // 2
+            y = self.root.winfo_y() + (self.root.winfo_height() - window_height) // 2
+            dialog.geometry(f"{window_width}x{window_height}+{x}+{y}")
+            
+            # 创建主框架
+            frame = tk.Frame(dialog, bg="#2b2b2b", padx=20, pady=10)
+            frame.pack(fill="both", expand=True)
+            
+            # 添加标题
+            title = tk.Label(
+                frame,
+                text="选择排序方式",
+                bg="#2b2b2b",
+                fg="white",
+                font=self.FONT_TITLE
+            )
+            title.pack(pady=(0, 10))
+            
+            # 创建排序选项按钮
+            def create_sort_button(text, sort_method):
+                btn = tk.Button(
+                    frame,
+                    text=text,
+                    command=lambda: [sort_method(), dialog.destroy()],
+                    bg="#4c5052",
+                    fg="white",
+                    activebackground="#5c6062",
+                    activeforeground="white",
+                    relief="flat",
+                    cursor="hand2",
+                    font=self.FONT_NORMAL,
+                    width=15
+                )
+                btn.pack(pady=5)
+                return btn
+            
+            # 添加排序按钮
+            create_sort_button("按名称升序", lambda: self._sort_buttons("name", reverse=False))
+            create_sort_button("按名称降序", lambda: self._sort_buttons("name", reverse=True))
+            create_sort_button("按类型排序", lambda: self._sort_buttons("type", reverse=False))
+            
+            # 取消按钮
+            cancel_btn = tk.Button(
+                frame,
+                text="取消",
+                command=dialog.destroy,
+                bg="#B85959",
+                fg="white",
+                activebackground="#C86666",
+                activeforeground="white",
+                relief="flat",
+                cursor="hand2",
+                font=self.FONT_NORMAL,
+                width=15
+            )
+            cancel_btn.pack(pady=10)
+            
+            # 设置模态对话框
+            dialog.grab_set()
+            dialog.focus_set()
+            
+        except Exception as e:
+            print(f"显示排序对话框失败: {e}")
+            self._show_message("无法打开排序对话框!")
+
+    def _sort_buttons(self, sort_by="name", reverse=False):
+        """排序按钮"""
+        try:
+            if sort_by == "name":
+                # 按名称排序
+                sorted_items = sorted(
+                    self.paths_data.items(),
+                    key=lambda x: x[0].lower(),
+                    reverse=reverse
+                )
+            elif sort_by == "type":
+                # 按类型排序
+                def get_type_priority(path):
+                    if path.startswith("folder:") or not any(path.startswith(p) for p in ["web:", "program:", "file:"]):
+                        return 0  # 文件夹优先
+                    elif path.startswith("program:"):
+                        return 1  # 程序次之
+                    elif path.startswith("file:"):
+                        try:
+                            file_info = json.loads(path[5:])
+                            type_priorities = {
+                                "工程文件": 2,  # 工程文件优先级提高
+                                "图片": 3,
+                                "视频": 4,
+                                "音频": 5,
+                                "文档": 6,
+                                "代码": 7,
+                                "压缩包": 8
+                            }
+                            return type_priorities.get(file_info['type'], 9)
+                        except:
+                            return 9
+                    elif path.startswith("web:"):
+                        return 10
+                    return 11
+                
+                sorted_items = sorted(
+                    self.paths_data.items(),
+                    key=lambda x: (get_type_priority(x[1]), x[0].lower())
+                )
+            
+            # 更新排序后的数据
+            self.paths_data = dict(sorted_items)
+            
+            # 保存新的顺序
+            self._save_paths()
+            
+            # 重新创建按钮
+            self._create_path_buttons()
+            
+            # 显示成功消息
+            self._show_message("排序完成!")
+            
+        except Exception as e:
+            print(f"排序失败: {e}")
+            self._show_message("排序失败!", important=True)  # 错误信息显示窗口
+
+    def _change_button_color(self, name, colors):
+        """更改按钮颜色"""
+        try:
+            if not self.root.winfo_exists():
+                print("主窗口已关闭")
+                return
+            
+            if name not in self.paths_data:
+                print(f"找不到按钮: {name}")
+                return
+            
+            path_data = self.paths_data[name]
+            original_data = self.paths_data.copy()  # 备份原始数据
+            
+            # 检查颜色数据的有效性
+            if not isinstance(colors, dict) or 'bg' not in colors or 'active_bg' not in colors:
+                print(f"无效的颜色数据: {colors}")
+                return
+            
+            # 检查是否是直接的文件夹路径
+            if not isinstance(path_data, str):
+                print(f"无效的路径数据类型: {type(path_data)}")
+                return
+            
+            try:
+                if not path_data.startswith(('program:', 'file:', 'web:', 'folder:')):
+                    # 如果是直接的文件夹路径，转换为folder格式
+                    folder_info = {
+                        'path': path_data,
+                        'colors': colors,
+                        'type': 'folder'
+                    }
+                    new_data = f"folder:{json.dumps(folder_info, ensure_ascii=False)}"
+                else:
+                    # 对于其他类型的路径，解析并更新颜色
+                    prefix, data = path_data.split(':', 1)
+                    info = json.loads(data)
+                    
+                    if not isinstance(info, dict):
+                        raise ValueError(f"无效的JSON数据格式: {info}")
+                    
+                    # 保留原有的所有信息，只更新颜色
+                    info['colors'] = colors
+                    if 'type' not in info:
+                        info['type'] = prefix
+                    
+                    new_data = f"{prefix}:{json.dumps(info, ensure_ascii=False)}"
+                    
+                # 先尝试验证新数据的有效性
+                if ':' in new_data:
+                    prefix, json_str = new_data.split(':', 1)
+                    json.loads(json_str)  # 验证JSON
+                
+                # 更新数据
+                self.paths_data[name] = new_data
+                
+                # 保存更改
+                try:
+                    self._save_paths()
+                except Exception as e:
+                    print(f"保存路径失败: {e}")
+                    self.paths_data = original_data  # 恢复原始数据
+                    raise
+                
+                # 安全地更新界面
+                def safe_update():
+                    if not self.root.winfo_exists():
+                        return
+                    try:
+                        self._create_path_buttons()
+                        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+                        self._show_message("颜色已更新!")
+                    except Exception as e:
+                        print(f"更新界面失败: {e}")
+                        self.paths_data = original_data  # 恢复原始数据
+                        self.root.after(100, self._create_path_buttons)
+                
+                # 使用after方法确保在主线程中更新UI
+                self.root.after(10, safe_update)
+                
+            except Exception as e:
+                print(f"处理颜色更改失败: {e}")
+                self.paths_data = original_data  # 恢复原始数据
+                self._show_message("更改颜色失败!")
+                # 尝试恢复界面
+                if self.root.winfo_exists():
+                    self.root.after(100, self._create_path_buttons)
+                
+        except Exception as e:
+            print(f"更改按钮颜色时出错: {e}")
+            if hasattr(self, 'paths_data') and 'original_data' in locals():
+                self.paths_data = original_data  # 确保恢复原始数据
+            self._show_message("更改颜色失败!")
+            # 最后的界面恢复尝试
+            if hasattr(self, 'root') and self.root.winfo_exists():
+                self.root.after(100, self._create_path_buttons)
+
+    def _validate_paths_data(self):
+        """验证路径数据的完整性"""
+        try:
+            for name, path_data in self.paths_data.items():
+                if isinstance(path_data, str):
+                    if path_data.startswith(('program:', 'file:', 'web:', 'folder:')):
+                        prefix, data_str = path_data.split(':', 1)
+                        # 验证JSON数据
+                        json.loads(data_str)
+            return True
+        except:
+            return False
+
+    def _safe_update_buttons(self):
+        """安全地更新按钮"""
+        try:
+            if self.root.winfo_exists():
+                self._create_path_buttons()
+                self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        except Exception as e:
+            print(f"更新按钮失败: {e}")
+
+    def _delayed_layout_update(self):
+        """延迟更新布局"""
+        try:
+            # 强制更新所有控件的布局
+            self.root.update_idletasks()
+            self.main_frame.update_idletasks()
+            self.buttons_frame.update_idletasks()
+            self.canvas.update_idletasks()
+            
+            # 确保画布宽度正确
+            self.canvas.itemconfig(self.canvas_frame, width=self.canvas.winfo_width())
+            
+            # 重新创建按钮
+            self._create_path_buttons()
+            
+            # 更新滚动区域
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        except Exception as e:
+            print(f"延迟布局更新失败: {e}")
+
+class ShortcutManager:
+    def __init__(self):
+        self.shortcuts = {}
+        self.tags = set()
+        
+    def add_shortcut(self, name, path, tags=None):
+        self.shortcuts[name] = {
+            'path': path,
+            'tags': set(tags or [])
+        }
+        if tags:
+            self.tags.update(tags)
+
+if __name__ == "__main__":
+    app = FolderAccessTool()
+    app.run()
