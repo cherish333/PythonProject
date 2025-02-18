@@ -1,0 +1,463 @@
+
+import tkinter as tk
+from tkinter import ttk, messagebox
+import subprocess
+import os
+from datetime import datetime
+import re
+import threading
+class SVNManager:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("UE5 SVN Manager")
+        self.root.geometry("600x500")
+        # 禁止调整窗口大小
+        self.root.resizable(False, False)
+        
+        # 添加路径配置文件
+        self.config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'last_path.txt')
+        
+        # 创建主框架
+        self.main_frame = ttk.Frame(root, padding="10")
+        self.main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # 创建日志区域（移到前面）
+        self.create_log_area()
+        
+        # 创建选择区域（包含 checkout_path）
+        self.create_selection_area()
+        
+        # 现在可以安全地加载上次路径
+        self.load_last_path()
+        
+        # 设置样式（其他初始化代码保持不变）
+        self.style = ttk.Style()
+        self.style.theme_use('clam')  # 使用clam主题作为基础
+        # 配置暗色样式
+        self.style.configure('.',
+            background='#2b2b2b',
+            foreground='#ffffff',
+            fieldbackground='#3c3f41',
+            selectbackground='#4b6eaf',
+            selectforeground='#ffffff'
+        )
+        # 配置不同控件的样式
+        self.style.configure('TFrame', background='#2b2b2b')
+        self.style.configure('TLabel', background='#2b2b2b', foreground='#ffffff')
+        self.style.configure('TButton',
+            background='#3c3f41',
+            foreground='#ffffff',
+            bordercolor='#5e6060',
+            lightcolor='#5e6060',
+            darkcolor='#5e6060',
+            focuscolor='#4b6eaf'
+        )
+        
+        # 添加进度条样式
+        self.style.configure("TProgressbar",
+            troughcolor='#2b2b2b',
+            background='#4CAF50',  # 进度条颜色（绿色）
+            bordercolor='#2b2b2b',
+            lightcolor='#2b2b2b',
+            darkcolor='#2b2b2b'
+        )
+        
+        self.style.map('TButton',
+            background=[('active', '#4b6eaf')],
+            foreground=[('active', '#ffffff')]
+        )
+        # 修改下拉框样式
+        self.style.configure('TCombobox',
+            background='#000000',
+            foreground='#ffffff',
+            fieldbackground='#000000',
+            selectbackground='#4b6eaf',
+            selectforeground='#ffffff',
+            arrowcolor='#ffffff'  # 下拉箭头颜色
+        )
+        self.style.map('TCombobox',
+            fieldbackground=[('readonly', '#000000')],
+            selectbackground=[('readonly', '#4b6eaf')]
+        )
+        self.style.configure('TCombobox',
+            background='#3c3f41',
+            foreground='#ffffff',
+            fieldbackground='#3c3f41',
+            selectbackground='#4b6eaf',
+            selectforeground='#ffffff'
+        )
+        # 设置根窗口背景色
+        self.root.configure(bg='#2b2b2b')
+        # SVN 认证信息
+        self.svn_username = "zhipeng.cui"
+        self.svn_password = "123qweQWE"
+        # SVN 仓库基础URL
+        self.base_url = "http://svn.diandian.info/svn/InfiniteGrowth"
+        # 创建主框架
+        self.main_frame = ttk.Frame(root, padding="10")
+        self.main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        # 加载上次的路径
+        self.load_last_path()
+        # 创建选择区域
+        self.create_selection_area()
+        # 创建操作按钮区域
+        self.create_operation_buttons()
+        # 创建日志区域
+        self.create_log_area()
+        # 初始化月份列表
+        self.update_month_list()
+        # 添加SVN认证信息
+        self.svn_username = "zhipeng.cui"
+        self.svn_password = "123qweQWE"
+    def create_selection_area(self):
+        # 创建选择区域的框架
+        selection_frame = ttk.Frame(self.main_frame)
+        selection_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E))
+        # 项目选择
+        ttk.Label(selection_frame, text="选择项目:").pack(side=tk.LEFT, padx=(0, 5))
+        self.month_combo = ttk.Combobox(selection_frame, state="readonly", width=10)
+        self.month_combo.pack(side=tk.LEFT, padx=(0, 20))
+        self.month_combo.bind('<<ComboboxSelected>>', self.on_month_selected)
+        # 月份选择
+        ttk.Label(selection_frame, text="月份:").pack(side=tk.LEFT, padx=(0, 5))
+        self.project_combo = ttk.Combobox(selection_frame, state="readonly", width=10)
+        self.project_combo.pack(side=tk.LEFT, padx=(0, 20))
+        self.project_combo.bind('<<ComboboxSelected>>', self.on_project_selected)
+        # 工程选择
+        ttk.Label(selection_frame, text="工程:").pack(side=tk.LEFT, padx=(0, 5))
+        self.engineering_combo = ttk.Combobox(selection_frame, state="readonly", width=10)
+        self.engineering_combo.pack(side=tk.LEFT)
+        # 添加检出路径选择
+        path_label = ttk.Label(self.main_frame, text="检出路径:")
+        path_label.grid(row=1, column=0, sticky=tk.W)
+        self.checkout_path = tk.StringVar()  
+        path_frame = ttk.Frame(self.main_frame)
+        path_frame.grid(row=1, column=0, columnspan=2, padx=(60, 0), sticky=(tk.W, tk.E))
+        self.path_entry = ttk.Entry(path_frame, textvariable=self.checkout_path, width=40)
+        self.path_entry.pack(side=tk.LEFT, expand=False)
+        ttk.Button(path_frame, text="浏览", command=self.browse_checkout_path).pack(side=tk.LEFT, padx=5)
+    def browse_checkout_path(self):
+        from tkinter import filedialog
+        path = filedialog.askdirectory()
+        if path:
+            self.checkout_path.set(path)
+            # 保存选择的路径
+            try:
+                with open(self.config_file, 'w') as f:
+                    f.write(path)
+            except Exception as e:
+                self.log_message(f"保存路径失败: {str(e)}")
+    def create_operation_buttons(self):
+        button_frame = ttk.Frame(self.main_frame)
+        button_frame.grid(row=3, column=0, columnspan=2, pady=10)
+        ttk.Button(button_frame, text="检出工程", command=self.checkout).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="上传", command=self.commit).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="更新", command=self.update).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="清理工程", command=self.cleanup).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="启动引擎", command=self.launch_engine).pack(side=tk.LEFT, padx=5)
+        
+        # 添加进度条（移到底部）
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(
+            self.main_frame,
+            variable=self.progress_var,
+            maximum=100,
+            mode='determinate',
+            style='TProgressbar'
+        )
+        self.progress_bar.grid(row=6, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=6)  # 修改行号为5
+        self.progress_bar.grid_remove()  # 默认隐藏进度条
+    def checkout(self):
+        selected_month = self.month_combo.get()
+        selected_project = self.project_combo.get()
+        selected_engineering = self.engineering_combo.get()  # 获取选中的工程
+        checkout_path = self.checkout_path.get()
+        
+        if not checkout_path:
+            messagebox.showerror("错误", "请选择检出路径")
+            return
+            
+        if selected_month and selected_project and selected_engineering:  # 确保工程也被选中
+            url = f"{self.base_url}/{selected_month}/{selected_project}/{selected_engineering}"  # 修改URL构建
+            
+            # 禁用所有按钮
+            for widget in self.main_frame.winfo_children():
+                if isinstance(widget, ttk.Button):
+                    widget.configure(state='disabled')
+            
+            # 显示进度条并重置进度
+            self.progress_var.set(0)
+            self.progress_bar.grid()
+            
+            # 创建进度提示
+            self.log_message("正在检出项目，请稍候...")
+            
+            def checkout_thread():
+                try:
+                    # 创建并配置 startupinfo
+                    startupinfo = subprocess.STARTUPINFO()
+                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    startupinfo.wShowWindow = subprocess.SW_HIDE
+                    
+                    # 首先获取总文件数
+                    list_process = subprocess.run(
+                        [
+                            'svn.exe',
+                            'list',
+                            url,
+                            '--recursive',
+                            '--username', self.svn_username,
+                            '--password', self.svn_password,
+                            '--non-interactive'
+                        ],
+                        capture_output=True,
+                        text=True,
+                        startupinfo=startupinfo
+                    )
+                    
+                    total_files = len(list_process.stdout.splitlines())
+                    current_file = 0
+                    
+                    process = subprocess.Popen(
+                        [
+                            'svn.exe',
+                            'checkout',
+                            url,
+                            checkout_path,
+                            '--username', self.svn_username,
+                            '--password', self.svn_password,
+                            '--non-interactive',
+                            '--trust-server-cert'
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        universal_newlines=True,
+                        startupinfo=startupinfo
+                    )
+                    
+                    # 读取输出并更新进度
+                    while True:
+                        line = process.stdout.readline()
+                        if not line:
+                            break
+                        if 'Checked out revision' in line:
+                            self.root.after(0, lambda: self.progress_var.set(100))
+                        elif line.startswith('A '):  # 检出文件时更新进度
+                            current_file += 1
+                            progress = (current_file / total_files) * 100
+                            self.root.after(0, lambda p=progress: self.progress_var.set(p))
+                        self.root.after(0, lambda: self.log_message(line.strip()))
+                    
+                    process.wait()
+                    
+                    # 检出完成后的处理
+                    self.root.after(0, lambda: self.log_message("检出完成！"))
+                    self.root.after(0, lambda: messagebox.showinfo("完成", "项目检出完成！"))
+                    self.root.after(0, lambda: self.progress_bar.grid_remove())  # 隐藏进度条
+                    
+                except Exception as e:
+                    self.root.after(0, lambda: self.log_message(f"检出失败: {str(e)}"))
+                
+                # 恢复按钮状态
+                self.root.after(0, self.enable_buttons)
+            
+            # 启动检出线程
+            threading.Thread(target=checkout_thread, daemon=True).start()
+    def enable_buttons(self):
+        # 恢复所有按钮状态
+        for widget in self.main_frame.winfo_children():
+            if isinstance(widget, ttk.Button):
+                widget.configure(state='normal')
+                self.execute_svn_command("checkout", url)
+    def commit(self):
+        selected_month = self.month_combo.get()
+        selected_project = self.project_combo.get()
+        if selected_month and selected_project:
+            path = f"{self.base_url}/{selected_month}/{selected_project}"
+            self.execute_svn_command("commit", path)
+    def update(self):
+        selected_month = self.month_combo.get()
+        selected_project = self.project_combo.get()
+        if selected_month and selected_project:
+            path = f"{self.base_url}/{selected_month}/{selected_project}"
+            self.execute_svn_command("update", path)
+    def cleanup(self):
+        selected_month = self.month_combo.get()
+        selected_project = self.project_combo.get()
+        if selected_month and selected_project:
+            path = f"{self.base_url}/{selected_month}/{selected_project}"
+            self.execute_svn_command("cleanup", path)
+    def create_log_area(self):
+        # 创建日志文本框
+        self.log_text = tk.Text(
+            self.main_frame,
+            height=20,
+            width=80,
+            bg='#2b2b2b',
+            fg='#ffffff',
+            insertbackground='#ffffff',
+            selectbackground='#4b6eaf',
+            selectforeground='#ffffff'
+        )
+        self.log_text.grid(row=4, column=0, columnspan=2, pady=10)  # 保持日志区域在row=4
+        
+        # 添加滚动条
+        scrollbar = ttk.Scrollbar(
+            self.main_frame,
+            orient=tk.VERTICAL,
+            command=self.log_text.yview
+        )
+        scrollbar.grid(row=4, column=2, sticky=(tk.N, tk.S))
+        self.log_text.configure(yscrollcommand=scrollbar.set)
+    def on_month_selected(self, event):
+        selected_month = self.month_combo.get()
+        if selected_month:
+            try:
+                url = f"{self.base_url}/{selected_month}"
+                cmd = [
+                    'svn.exe',
+                    'list',
+                    url,
+                    '--username', self.svn_username,
+                    '--password', self.svn_password,
+                    '--non-interactive'
+                ]
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+                
+                result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
+                
+                # 更新项目下拉列表
+                projects = [line.strip('/') for line in result.stdout.splitlines() if line.strip()]
+                self.project_combo['values'] = projects
+                if projects:
+                    self.project_combo.set(projects[0])
+                    
+            except Exception as e:
+                self.log_message(f"获取项目列表失败: {str(e)}")
+    def update_month_list(self):
+        try:
+            cmd = [
+                'svn.exe',
+                'list',
+                self.base_url,
+                '--username', self.svn_username,
+                '--password', self.svn_password,
+                '--non-interactive'
+            ]
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
+            
+            # 解析输出获取月份列表
+            months = [line.strip('/') for line in result.stdout.splitlines() if line.strip()]
+            self.month_combo['values'] = months
+            if months:
+                self.month_combo.set(months[-1])
+                self.on_month_selected(None)
+                
+        except Exception as e:
+            self.log_message(f"获取月份列表失败: {str(e)}")
+    def on_project_selected(self, event):
+        selected_month = self.month_combo.get()
+        selected_project = self.project_combo.get()
+        if selected_month and selected_project:
+            try:
+                url = f"{self.base_url}/{selected_month}/{selected_project}"
+                cmd = [
+                    'svn.exe',
+                    'list',
+                    url,
+                    '--username', self.svn_username,
+                    '--password', self.svn_password,
+                    '--non-interactive'
+                ]
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+                
+                result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
+                
+                # 更新工程下拉列表
+                engineering_list = [line.strip('/') for line in result.stdout.splitlines() if line.strip()]
+                self.engineering_combo['values'] = engineering_list
+                if engineering_list:
+                    self.engineering_combo.set(engineering_list[0])
+                    
+            except Exception as e:
+                self.log_message(f"获取工程列表失败: {str(e)}")
+    def load_last_path(self):
+        """Load the last used path from config file"""
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r') as f:
+                    last_path = f.read().strip()
+                    if os.path.exists(last_path):
+                        self.checkout_path.set(last_path)
+        except Exception as e:
+            self.log_message(f"加载上次路径失败: {str(e)}")
+    def log_message(self, message):
+        self.log_text.insert(tk.END, f"{message}\n")
+        self.log_text.see(tk.END)
+    # 添加新方法
+    def launch_engine(self):
+        checkout_path = self.checkout_path.get()
+        if not checkout_path:
+            messagebox.showerror("错误", "请先选择工程路径")
+            return
+            
+        # 搜索.uproject文件
+        uproject_files = []
+        for root, dirs, files in os.walk(checkout_path):
+            for file in files:
+                if file.endswith('.uproject'):
+                    uproject_files.append(os.path.join(root, file))
+        
+        if not uproject_files:
+            messagebox.showerror("错误", "未找到.uproject文件")
+            return
+            
+        # 如果找到多个.uproject文件，让用户选择
+        selected_file = uproject_files[0]
+        if len(uproject_files) > 1:
+            from tkinter import simpledialog
+            options = "\n".join([f"{i+1}. {os.path.basename(f)}" for i, f in enumerate(uproject_files)])
+            choice = simpledialog.askinteger("选择项目", 
+                f"找到多个项目文件，请选择要打开的项目编号：\n{options}", 
+                minvalue=1, maxvalue=len(uproject_files))
+            if not choice:
+                return
+            selected_file = uproject_files[choice-1]
+        
+        try:
+            # 查找UE编辑器路径
+            ue_paths = [
+                r"C:\Program Files\Epic Games\UE_5.3\Engine\Binaries\Win64\UnrealEditor.exe",  # 添加你的UE5.3路径
+                r"C:\Program Files\Epic Games\UE_5.1\Engine\Binaries\Win64\UnrealEditor.exe",
+                r"C:\Program Files\Epic Games\UE_5.0\Engine\Binaries\Win64\UnrealEditor.exe",
+                r"D:\Epic Games\UE_5.1\Engine\Binaries\Win64\UnrealEditor.exe",
+                r"D:\Epic Games\UE_5.0\Engine\Binaries\Win64\UnrealEditor.exe"
+            ]
+            
+            ue_path = None
+            for path in ue_paths:
+                if os.path.exists(path):
+                    ue_path = path
+                    break
+            
+            if not ue_path:
+                raise FileNotFoundError("未找到虚幻引擎编辑器，请确保已正确安装UE5")
+            # 使用UE编辑器启动项目
+            subprocess.Popen([ue_path, selected_file])
+            self.log_message(f"正在启动项目：{os.path.basename(selected_file)}")
+            
+        except Exception as e:
+            self.log_message(f"启动失败: {str(e)}")
+            messagebox.showerror("错误", f"启动引擎失败：{str(e)}")
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = SVNManager(root)
+    root.mainloop()
